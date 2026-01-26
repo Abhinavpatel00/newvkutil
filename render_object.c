@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "stb/stb_ds.h"
 
@@ -124,6 +125,91 @@ static char* dup_string(const char* s)
     return out;
 }
 
+static bool ends_with(const char* s, const char* suffix)
+{
+    if(!s || !suffix)
+        return false;
+
+    size_t sl = strlen(s);
+    size_t su = strlen(suffix);
+
+    if(su > sl)
+        return false;
+
+    return strcmp(s + (sl - su), suffix) == 0;
+}
+
+// compiledshaders/foo.frag.spv -> shaders/foo.frag
+static bool spv_to_source_path(char* out, size_t out_cap, const char* spv_path)
+{
+    if(!spv_path || !out || out_cap == 0)
+        return false;
+
+    if(!ends_with(spv_path, ".spv"))
+        return false;
+
+    const char* prefix_spv = "compiledshaders/";
+    const char* prefix_src = "shaders/";
+
+    if(strncmp(spv_path, prefix_spv, strlen(prefix_spv)) != 0)
+        return false;
+
+    const char* rest = spv_path + strlen(prefix_spv);
+
+    size_t rest_len = strlen(rest);
+    if(rest_len <= 4)
+        return false;
+
+    size_t new_len = rest_len - 4;  // strip ".spv"
+
+    int n = snprintf(out, out_cap, "%s%.*s", prefix_src, (int)new_len, rest);
+    return (n > 0 && (size_t)n < out_cap);
+}
+
+static uint64_t file_mtime_ns(const char* path)
+{
+    if(!path)
+        return 0;
+
+    struct stat st;
+    if(stat(path, &st) != 0)
+        return 0;
+
+#if defined(__APPLE__)
+    return (uint64_t)st.st_mtimespec.tv_sec * 1000000000ull + (uint64_t)st.st_mtimespec.tv_nsec;
+#else
+    return (uint64_t)st.st_mtim.tv_sec * 1000000000ull + (uint64_t)st.st_mtim.tv_nsec;
+#endif
+}
+
+static bool compile_glsl_to_spv(const char* src_path, const char* spv_path)
+{
+    if(!src_path || !spv_path)
+        return false;
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "glslc \"%s\" -o \"%s\" 2> compiledshaders/shader_errors.txt", src_path, spv_path);
+
+    int r = system(cmd);
+    if(r != 0)
+    {
+        log_error("glslc failed: %s -> %s", src_path, spv_path);
+
+        FILE* f = fopen("compiledshaders/shader_errors.txt", "rb");
+        if(f)
+        {
+            char buf[1024];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+            buf[n] = 0;
+            log_error("glslc error: %s", buf);
+            fclose(f);
+        }
+        return false;
+    }
+
+    return true;
+}
+
 static bool is_buffer_descriptor(VkDescriptorType type)
 {
     switch(type)
@@ -135,6 +221,488 @@ static bool is_buffer_descriptor(VkDescriptorType type)
             return true;
         default:
             return false;
+    }
+}
+
+// ------------------------------------------------------------
+// Shader hot reload (RenderPipeline)
+// ------------------------------------------------------------
+
+typedef struct RenderPipelineHotReloadEntry
+{
+    bool              reloadable;
+    bool              is_compute;
+    VkDevice          device;
+    VkPipelineCache   cache;
+    RenderPipeline*   pipeline;
+    RenderObjectSpec  spec;
+    char*             vert_path;
+    char*             frag_path;
+    char*             comp_path;
+    uint64_t          vert_mtime;
+    uint64_t          frag_mtime;
+    uint64_t          comp_mtime;
+} RenderPipelineHotReloadEntry;
+
+static RenderPipelineHotReloadEntry* g_render_reload_entries = NULL;
+static size_t                        g_render_reload_count   = 0;
+static size_t                        g_render_reload_cap     = 0;
+
+static RenderObjectSpec render_object_spec_clone(const RenderObjectSpec* spec)
+{
+    RenderObjectSpec out = *spec;
+
+    if(spec->color_attachment_count > 0 && spec->color_formats)
+    {
+        VkFormat* formats = (VkFormat*)malloc(sizeof(VkFormat) * spec->color_attachment_count);
+        if(formats)
+        {
+            memcpy(formats, spec->color_formats, sizeof(VkFormat) * spec->color_attachment_count);
+            out.color_formats = formats;
+        }
+    }
+    else
+    {
+        out.color_formats = NULL;
+    }
+
+    if(spec->dynamic_state_count > 0 && spec->dynamic_states)
+    {
+        VkDynamicState* states = (VkDynamicState*)malloc(sizeof(VkDynamicState) * spec->dynamic_state_count);
+        if(states)
+        {
+            memcpy(states, spec->dynamic_states, sizeof(VkDynamicState) * spec->dynamic_state_count);
+            out.dynamic_states = states;
+        }
+    }
+    else
+    {
+        out.dynamic_states = NULL;
+    }
+
+    if(spec->spec_constant_count > 0 && spec->spec_map)
+    {
+        VkSpecializationMapEntry* maps =
+            (VkSpecializationMapEntry*)malloc(sizeof(VkSpecializationMapEntry) * spec->spec_constant_count);
+        if(maps)
+        {
+            memcpy(maps, spec->spec_map, sizeof(VkSpecializationMapEntry) * spec->spec_constant_count);
+            out.spec_map = maps;
+        }
+    }
+    else
+    {
+        out.spec_map = NULL;
+    }
+
+    if(spec->spec_data_size > 0 && spec->spec_data)
+    {
+        void* data = malloc(spec->spec_data_size);
+        if(data)
+        {
+            memcpy(data, spec->spec_data, spec->spec_data_size);
+            out.spec_data = data;
+        }
+    }
+    else
+    {
+        out.spec_data = NULL;
+        out.spec_data_size = 0;
+    }
+
+    return out;
+}
+
+static void render_reload_entries_push(const RenderPipelineHotReloadEntry* entry)
+{
+    if(g_render_reload_count == g_render_reload_cap)
+    {
+        size_t new_cap = (g_render_reload_cap == 0) ? 8 : g_render_reload_cap * 2;
+        void*  mem     = realloc(g_render_reload_entries, new_cap * sizeof(RenderPipelineHotReloadEntry));
+        if(!mem)
+            return;
+
+        g_render_reload_entries = (RenderPipelineHotReloadEntry*)mem;
+        g_render_reload_cap     = new_cap;
+    }
+
+    g_render_reload_entries[g_render_reload_count++] = *entry;
+}
+
+static VkPipeline render_pipeline_rebuild(RenderPipeline* pipe, VkPipelineCache cache, const RenderObjectSpec* spec)
+{
+    if(!pipe || !spec)
+        return VK_NULL_HANDLE;
+
+    VkDevice device = pipe->device;
+
+    VkSpecializationInfo spec_info = {0};
+    if(spec->spec_constant_count > 0 && spec->spec_map && spec->spec_data && spec->spec_data_size > 0)
+    {
+        spec_info.mapEntryCount = spec->spec_constant_count;
+        spec_info.pMapEntries   = spec->spec_map;
+        spec_info.dataSize      = spec->spec_data_size;
+        spec_info.pData         = spec->spec_data;
+    }
+
+    if(spec->comp_spv)
+    {
+        void*  comp_code = NULL;
+        size_t comp_size = 0;
+        if(!read_file(spec->comp_spv, &comp_code, &comp_size))
+            return VK_NULL_HANDLE;
+
+        VkShaderModule comp_mod = create_shader_module(device, comp_code, comp_size);
+
+        VkPipelineShaderStageCreateInfo stage = {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = comp_mod,
+            .pName  = "main",
+            .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
+        };
+
+        VkComputePipelineCreateInfo ci = {
+            .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage  = stage,
+            .layout = pipe->layout,
+        };
+
+        VkPipeline new_pipe = VK_NULL_HANDLE;
+        VK_CHECK(vkCreateComputePipelines(device, cache, 1, &ci, NULL, &new_pipe));
+
+        vkDestroyShaderModule(device, comp_mod, NULL);
+        free(comp_code);
+
+        return new_pipe;
+    }
+
+    void*  vert_code = NULL;
+    void*  frag_code = NULL;
+    size_t vert_size = 0;
+    size_t frag_size = 0;
+
+    if(!spec->vert_spv || !spec->frag_spv)
+        return VK_NULL_HANDLE;
+
+    if(!read_file(spec->vert_spv, &vert_code, &vert_size))
+        return VK_NULL_HANDLE;
+
+    if(!read_file(spec->frag_spv, &frag_code, &frag_size))
+    {
+        free(vert_code);
+        return VK_NULL_HANDLE;
+    }
+
+    VkShaderModule vert_mod = create_shader_module(device, vert_code, vert_size);
+    VkShaderModule frag_mod = create_shader_module(device, frag_code, frag_size);
+
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert_mod,
+            .pName  = "main",
+            .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
+        },
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag_mod,
+            .pName  = "main",
+            .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
+        },
+    };
+
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext                           = NULL,
+        .flags                           = 0,
+        .vertexBindingDescriptionCount   = 0,
+        .pVertexBindingDescriptions      = NULL,
+        .vertexAttributeDescriptionCount = 0,
+        .pVertexAttributeDescriptions    = NULL,
+    };
+
+    VkVertexInputAttributeDescription attrs[16] = {0};
+    VkVertexInputBindingDescription   bindings[8] = {0};
+    VkVertexInputAttributeDescription* attrs_ptr = NULL;
+    VkVertexInputBindingDescription*   bindings_ptr = NULL;
+    uint32_t attr_count = 0;
+    uint32_t binding_count = 0;
+
+    if(spec->use_vertex_input)
+    {
+        ShaderReflection vert_reflect = {0};
+        if(shader_reflect_create(&vert_reflect, vert_code, vert_size))
+        {
+            attr_count = shader_reflect_get_vertex_attributes(&vert_reflect, attrs, 16, 0);
+            shader_reflect_destroy(&vert_reflect);
+        }
+
+        uint32_t stride = 0;
+        for(uint32_t i = 0; i < attr_count; i++)
+        {
+            uint32_t end = attrs[i].offset;
+            switch(attrs[i].format)
+            {
+                case VK_FORMAT_R32_SFLOAT:
+                    end += 4;
+                    break;
+                case VK_FORMAT_R32G32_SFLOAT:
+                    end += 8;
+                    break;
+                case VK_FORMAT_R32G32B32_SFLOAT:
+                    end += 12;
+                    break;
+                case VK_FORMAT_R32G32B32A32_SFLOAT:
+                    end += 16;
+                    break;
+                default:
+                    end += 4;
+                    break;
+            }
+            if(end > stride)
+                stride = end;
+        }
+
+        if(attr_count > 0)
+        {
+            binding_count = 1;
+            bindings[0] = (VkVertexInputBindingDescription){
+                .binding   = 0,
+                .stride    = stride,
+                .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+            };
+        }
+
+        bindings_ptr = (binding_count > 0) ? bindings : NULL;
+        attrs_ptr    = (attr_count > 0) ? attrs : NULL;
+    }
+
+    vertex_input.vertexBindingDescriptionCount   = binding_count;
+    vertex_input.pVertexBindingDescriptions      = bindings_ptr;
+    vertex_input.vertexAttributeDescriptionCount = attr_count;
+    vertex_input.pVertexAttributeDescriptions    = attrs_ptr;
+
+    if(vertex_input.vertexAttributeDescriptionCount > 0 && vertex_input.vertexBindingDescriptionCount == 0)
+    {
+        vertex_input.vertexAttributeDescriptionCount = 0;
+        vertex_input.pVertexAttributeDescriptions    = NULL;
+    }
+
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology               = spec->topology,
+        .primitiveRestartEnable = VK_FALSE,
+    };
+
+    VkPipelineViewportStateCreateInfo viewport = {
+        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .scissorCount  = 1,
+    };
+
+    VkPipelineRasterizationStateCreateInfo raster = {
+        .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = spec->polygon_mode,
+        .cullMode    = spec->cull_mode,
+        .frontFace   = spec->front_face,
+        .lineWidth   = 1.0f,
+    };
+
+    VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+        .sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable  = spec->depth_test,
+        .depthWriteEnable = spec->depth_write,
+        .depthCompareOp   = spec->depth_compare,
+    };
+
+    VkPipelineColorBlendAttachmentState blend_atts[8] = {0};
+    for(uint32_t i = 0; i < spec->color_attachment_count && i < 8; i++)
+    {
+        blend_atts[i] = (VkPipelineColorBlendAttachmentState){
+            .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+            .blendEnable         = spec->blend_enable ? VK_TRUE : VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .colorBlendOp        = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .alphaBlendOp        = VK_BLEND_OP_ADD,
+        };
+    }
+
+    VkPipelineColorBlendStateCreateInfo blend = {
+        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = spec->color_attachment_count,
+        .pAttachments    = blend_atts,
+    };
+
+    VkDynamicState default_dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+
+    VkPipelineDynamicStateCreateInfo dynamic = {
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = (spec->dynamic_state_count > 0) ? spec->dynamic_state_count : 2,
+        .pDynamicStates    = (spec->dynamic_state_count > 0) ? spec->dynamic_states : default_dyn,
+    };
+
+    VkPipelineRenderingCreateInfo rendering = {
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount    = spec->color_attachment_count,
+        .pColorAttachmentFormats = spec->color_formats,
+        .depthAttachmentFormat   = spec->depth_format,
+        .stencilAttachmentFormat = spec->stencil_format,
+    };
+
+    VkGraphicsPipelineCreateInfo ci = {
+        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext               = &rendering,
+        .stageCount          = 2,
+        .pStages             = stages,
+        .pVertexInputState   = &vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState      = &viewport,
+        .pRasterizationState = &raster,
+        .pMultisampleState   = &multisample,
+        .pDepthStencilState  = &depth_stencil,
+        .pColorBlendState    = &blend,
+        .pDynamicState       = &dynamic,
+        .layout              = pipe->layout,
+    };
+
+    VkPipeline new_pipe = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateGraphicsPipelines(device, cache, 1, &ci, NULL, &new_pipe));
+
+    vkDestroyShaderModule(device, vert_mod, NULL);
+    vkDestroyShaderModule(device, frag_mod, NULL);
+
+    free(vert_code);
+    free(frag_code);
+
+    return new_pipe;
+}
+
+static void render_pipeline_hot_reload_register(RenderPipeline* pipe,
+                                                VkPipelineCache cache,
+                                                const RenderObjectSpec* spec)
+{
+    if(!pipe || !spec || !spec->reloadable)
+        return;
+
+    RenderPipelineHotReloadEntry entry = {0};
+    entry.reloadable = true;
+    entry.is_compute = (spec->comp_spv != NULL);
+    entry.device     = pipe->device;
+    entry.cache      = cache;
+    entry.pipeline   = pipe;
+
+    entry.spec = render_object_spec_clone(spec);
+
+    if(spec->vert_spv)
+        entry.vert_path = dup_string(spec->vert_spv);
+    if(spec->frag_spv)
+        entry.frag_path = dup_string(spec->frag_spv);
+    if(spec->comp_spv)
+        entry.comp_path = dup_string(spec->comp_spv);
+
+    if(entry.vert_path)
+        entry.spec.vert_spv = entry.vert_path;
+    if(entry.frag_path)
+        entry.spec.frag_spv = entry.frag_path;
+    if(entry.comp_path)
+        entry.spec.comp_spv = entry.comp_path;
+
+    char src_path[1024];
+    if(entry.vert_path && spv_to_source_path(src_path, sizeof(src_path), entry.vert_path))
+        entry.vert_mtime = file_mtime_ns(src_path);
+    if(entry.frag_path && spv_to_source_path(src_path, sizeof(src_path), entry.frag_path))
+        entry.frag_mtime = file_mtime_ns(src_path);
+    if(entry.comp_path && spv_to_source_path(src_path, sizeof(src_path), entry.comp_path))
+        entry.comp_mtime = file_mtime_ns(src_path);
+
+    render_reload_entries_push(&entry);
+}
+
+void render_pipeline_hot_reload_update(void)
+{
+    if(g_render_reload_count == 0)
+        return;
+
+    for(size_t i = 0; i < g_render_reload_count; i++)
+    {
+        RenderPipelineHotReloadEntry* e = &g_render_reload_entries[i];
+
+        if(!e->reloadable || !e->pipeline || !e->device)
+            continue;
+
+        if(e->is_compute)
+        {
+            char comp_src[1024];
+            if(!e->comp_path || !spv_to_source_path(comp_src, sizeof(comp_src), e->comp_path))
+                continue;
+
+            uint64_t comp_src_mtime = file_mtime_ns(comp_src);
+            if(comp_src_mtime == e->comp_mtime)
+                continue;
+
+            if(!compile_glsl_to_spv(comp_src, e->comp_path))
+                continue;
+
+            e->comp_mtime = comp_src_mtime;
+
+            VkPipeline new_pipe = render_pipeline_rebuild(e->pipeline, e->cache, &e->spec);
+            if(new_pipe != VK_NULL_HANDLE)
+            {
+                vkDeviceWaitIdle(e->device);
+                if(e->pipeline->pipeline)
+                    vkDestroyPipeline(e->device, e->pipeline->pipeline, NULL);
+                e->pipeline->pipeline = new_pipe;
+            }
+
+            continue;
+        }
+
+        char vert_src[1024], frag_src[1024];
+        if(!e->vert_path || !e->frag_path)
+            continue;
+        if(!spv_to_source_path(vert_src, sizeof(vert_src), e->vert_path)
+           || !spv_to_source_path(frag_src, sizeof(frag_src), e->frag_path))
+        {
+            continue;
+        }
+
+        uint64_t vert_src_mtime = file_mtime_ns(vert_src);
+        uint64_t frag_src_mtime = file_mtime_ns(frag_src);
+
+        if(vert_src_mtime == e->vert_mtime && frag_src_mtime == e->frag_mtime)
+            continue;
+
+        bool ok = true;
+        if(vert_src_mtime != e->vert_mtime)
+            ok &= compile_glsl_to_spv(vert_src, e->vert_path);
+        if(frag_src_mtime != e->frag_mtime)
+            ok &= compile_glsl_to_spv(frag_src, e->frag_path);
+
+        if(!ok)
+            continue;
+
+        e->vert_mtime = vert_src_mtime;
+        e->frag_mtime = frag_src_mtime;
+
+        VkPipeline new_pipe = render_pipeline_rebuild(e->pipeline, e->cache, &e->spec);
+        if(new_pipe != VK_NULL_HANDLE)
+        {
+            vkDeviceWaitIdle(e->device);
+            if(e->pipeline->pipeline)
+                vkDestroyPipeline(e->device, e->pipeline->pipeline, NULL);
+            e->pipeline->pipeline = new_pipe;
+        }
     }
 }
 
@@ -253,6 +821,7 @@ RenderObjectSpec render_object_spec_from_config(const GraphicsPipelineConfig* cf
     spec.color_formats          = cfg->color_formats;
     spec.depth_format           = cfg->depth_format;
     spec.stencil_format         = cfg->stencil_format;
+    spec.reloadable             = cfg->reloadable ? VK_TRUE : VK_FALSE;
     return spec;
 }
 
@@ -1037,6 +1606,9 @@ RenderPipeline render_pipeline_create(VkDevice               device,
     free(vert_code);
     free(frag_code);
     free(comp_code);
+
+    if(spec && spec->reloadable && out.pipeline != VK_NULL_HANDLE)
+        render_pipeline_hot_reload_register(&out, pipeline_cache, spec);
 
     return out;
 }

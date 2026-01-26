@@ -143,6 +143,7 @@ typedef struct RenderObjectSpec
     VkBool32 use_bindless_if_available;
     VkBool32 per_frame_sets;
     uint32_t bindless_descriptor_count;
+    VkBool32 reloadable;
 
     // Dynamic states (optional)
     uint32_t              dynamic_state_count;
@@ -175,6 +176,7 @@ static inline RenderObjectSpec render_object_spec_default(void)
         .use_bindless_if_available  = VK_FALSE,
         .per_frame_sets             = VK_FALSE,
         .bindless_descriptor_count  = 0,
+        .reloadable                 = VK_FALSE,
         .dynamic_state_count        = 0,
         .dynamic_states             = NULL,
         .spec_constant_count        = 0,
@@ -282,6 +284,9 @@ RenderPipeline render_pipeline_create(VkDevice               device,
                                      DescriptorLayoutCache* desc_cache,
                                      PipelineLayoutCache*   pipe_cache,
                                      const RenderObjectSpec* spec);
+
+// Shader hot reload (no-op unless any reloadable pipelines are registered)
+void render_pipeline_hot_reload_update(void);
 
 void render_pipeline_destroy(VkDevice device, RenderPipeline* pipe);
 
