@@ -15,6 +15,12 @@ typedef struct GpuScope
     uint32_t q_end;
 } GpuScope;
 
+typedef struct GpuResolvedScope
+{
+    char  name[GPU_PROF_NAME_MAX];
+    float us;
+} GpuResolvedScope;
+
 typedef struct GpuProfiler
 {
     VkDevice         device;
@@ -27,6 +33,10 @@ typedef struct GpuProfiler
 
     GpuScope scopes[GPU_PROF_MAX_SCOPES];
     uint32_t scope_count;
+
+    // resolved scopes for last completed frame
+    GpuResolvedScope resolved[GPU_PROF_MAX_SCOPES];
+    uint32_t        resolved_count;
 
     // stack for nested scopes
     uint32_t stack[GPU_PROF_MAX_SCOPES];
@@ -46,11 +56,18 @@ void gpu_prof_end_frame(VkCommandBuffer cmd, GpuProfiler* p);
 void gpu_prof_scope_begin(VkCommandBuffer cmd, GpuProfiler* p, const char* name, VkPipelineStageFlags2 stage);
 void gpu_prof_scope_end(VkCommandBuffer cmd, GpuProfiler* p, VkPipelineStageFlags2 stage);
 
+// Resolve scope times into a cached list (call AFTER fence wait, BEFORE begin_frame)
+void gpu_prof_resolve(GpuProfiler* p);
+
 // Read scope time in microseconds (call AFTER fence wait)
 bool gpu_prof_get_us(GpuProfiler* p, const char* name, float* out_us);
 
 // Optional: print all scopes (call AFTER fence wait)
 void gpu_prof_dump(GpuProfiler* p);
+
+// Emit cached scope timings to debug text (call after gpu_prof_resolve)
+typedef struct VkDebugText VkDebugText;
+void gpu_prof_debug_text(GpuProfiler* p, VkDebugText* dt, int x, int y, int scale, uint32_t header_rgba, uint32_t row_rgba);
 
 // Scoped macro (C "RAII" hack)
 #define GPU_SCOPE(cmd, prof, name, stage) \

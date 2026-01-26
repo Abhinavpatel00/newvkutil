@@ -813,13 +813,6 @@ typedef struct ToonPC
     vec4 params3;              // x=isFace, y=outlineZOffsetRemapStart, z=outlineZOffsetRemapEnd, w=unused
 } ToonPC;
 
-typedef struct GpuStats
-{
-    float frame_us;
-    float gfx_us;
-    float text_us;
-} GpuStats;
-
 static const Vertex TRIANGLE_VERTS[] = {
     {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
     {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
@@ -1351,7 +1344,7 @@ int main()
     water_ro_inst = render_instance_create(&water_obj.pipeline, &water_obj.resources);
 
     GpuProfiler prof[MAX_FRAME_IN_FLIGHT];
-    GpuStats    stats[MAX_FRAME_IN_FLIGHT] = {0};
+    float       cpu_frame_ms[MAX_FRAME_IN_FLIGHT] = {0};
 
     for(u32 i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
     {
@@ -1823,6 +1816,7 @@ int main()
 
     while(!glfwWindowShouldClose(window))
     {
+        double cpu_frame_start = glfwGetTime();
         glfwPollEvents();
 
         pipeline_hot_reload_update();
@@ -2137,20 +2131,8 @@ int main()
         }
 
 
-        {
-            float frame_us = 0.0f, gfx_us = 0.0f, text_us = 0.0f;
-
-            gpu_prof_get_us(&prof[current_frame], "frame", &frame_us);
-            gpu_prof_get_us(&prof[current_frame], "gfx", &gfx_us);
-            gpu_prof_get_us(&prof[current_frame], "debug_text", &text_us);
-
-            stats[current_frame] = (GpuStats){
-                .frame_us = frame_us,
-                .gfx_us   = gfx_us,
-                .text_us  = text_us,
-            };
-        }
         GpuProfiler* P = &prof[current_frame];
+        gpu_prof_resolve(P);
         vkResetFences(device, 1, &frame_sync[current_frame].in_flight_fence);
         /* reset EVERYTHING allocated for this frame */
         vkResetCommandPool(device, cmd_pools[current_frame], 0);
@@ -2188,33 +2170,36 @@ int main()
 
         if(paint_active)
         {
-            if(sculpt_delta_layout != VK_IMAGE_LAYOUT_GENERAL)
+            GPU_SCOPE(cmd, P, "terrain_paint", VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
             {
-                IMAGE_BARRIER_IMMEDIATE(cmd, sculpt_delta_image, sculpt_delta_layout, VK_IMAGE_LAYOUT_GENERAL);
-                sculpt_delta_layout = VK_IMAGE_LAYOUT_GENERAL;
+                if(sculpt_delta_layout != VK_IMAGE_LAYOUT_GENERAL)
+                {
+                    IMAGE_BARRIER_IMMEDIATE(cmd, sculpt_delta_image, sculpt_delta_layout, VK_IMAGE_LAYOUT_GENERAL);
+                    sculpt_delta_layout = VK_IMAGE_LAYOUT_GENERAL;
+                }
+
+                render_instance_bind(cmd, &terrain_paint_inst, VK_PIPELINE_BIND_POINT_COMPUTE, current_frame);
+
+                TerrainPaintPC brush_pc = {
+                    .centerXZ = {sculpt_anchor_xz[0], sculpt_anchor_xz[1]},
+                    .radius   = terrain_gui.brush_radius,
+                    .strength = sculpt_delta * 0.02f,  // Per-frame delta scaled to height
+                    .hardness = terrain_gui.brush_hardness,
+                    .pad0     = 0.0f,
+                    .mapMin   = {terrain_map_min[0], terrain_map_min[1]},
+                    .mapMax   = {terrain_map_max[0], terrain_map_max[1]},
+                };
+
+                render_instance_set_push_data(&terrain_paint_inst, &brush_pc, sizeof(TerrainPaintPC));
+                render_instance_push(cmd, &terrain_paint_inst);
+
+                uint32_t group_x = (HEIGHTMAP_RES + 7u) / 8u;
+                uint32_t group_y = (HEIGHTMAP_RES + 7u) / 8u;
+                vkCmdDispatch(cmd, group_x, group_y, 1);
+
+                IMAGE_BARRIER_IMMEDIATE(cmd, sculpt_delta_image, sculpt_delta_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                sculpt_delta_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             }
-
-            render_instance_bind(cmd, &terrain_paint_inst, VK_PIPELINE_BIND_POINT_COMPUTE, current_frame);
-
-            TerrainPaintPC brush_pc = {
-                .centerXZ = {sculpt_anchor_xz[0], sculpt_anchor_xz[1]},
-                .radius   = terrain_gui.brush_radius,
-                .strength = sculpt_delta * 0.02f,  // Per-frame delta scaled to height
-                .hardness = terrain_gui.brush_hardness,
-                .pad0     = 0.0f,
-                .mapMin   = {terrain_map_min[0], terrain_map_min[1]},
-                .mapMax   = {terrain_map_max[0], terrain_map_max[1]},
-            };
-
-            render_instance_set_push_data(&terrain_paint_inst, &brush_pc, sizeof(TerrainPaintPC));
-            render_instance_push(cmd, &terrain_paint_inst);
-
-            uint32_t group_x = (HEIGHTMAP_RES + 7u) / 8u;
-            uint32_t group_y = (HEIGHTMAP_RES + 7u) / 8u;
-            vkCmdDispatch(cmd, group_x, group_y, 1);
-
-            IMAGE_BARRIER_IMMEDIATE(cmd, sculpt_delta_image, sculpt_delta_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            sculpt_delta_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
         else if(sculpt_delta_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
         {
@@ -2247,117 +2232,120 @@ int main()
                                      .pDepthAttachment = &depth_attach};
 
 
-        vk_cmd_set_viewport_scissor(cmd, swap.extent);
-        vkCmdBeginRendering(cmd, &rendering);
-
-        // terrain draw
-        render_instance_bind(cmd, &terrain_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
-
-        // Determine brush display position + direction visualization
-        vec2  brush_display_xz  = {0.0f, 0.0f};
-        float brush_active_flag = 0.0f;
-        float brush_delta_vis   = 0.0f;
-        if(sculpt_mode)
+        GPU_SCOPE(cmd, P, "terrain", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
         {
-            if(sculpt_dragging)
+            vk_cmd_set_viewport_scissor(cmd, swap.extent);
+            vkCmdBeginRendering(cmd, &rendering);
+
+            // terrain draw
+            render_instance_bind(cmd, &terrain_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
+
+            // Determine brush display position + direction visualization
+            vec2  brush_display_xz  = {0.0f, 0.0f};
+            float brush_active_flag = 0.0f;
+            float brush_delta_vis   = 0.0f;
+            if(sculpt_mode)
             {
-                brush_display_xz[0] = sculpt_anchor_xz[0];
-                brush_display_xz[1] = sculpt_anchor_xz[1];
-                brush_active_flag   = 1.0f;  // Actively sculpting
-                brush_delta_vis     = fmaxf(-1.0f, fminf(1.0f, sculpt_delta * 0.1f));
+                if(sculpt_dragging)
+                {
+                    brush_display_xz[0] = sculpt_anchor_xz[0];
+                    brush_display_xz[1] = sculpt_anchor_xz[1];
+                    brush_active_flag   = 1.0f;  // Actively sculpting
+                    brush_delta_vis     = fmaxf(-1.0f, fminf(1.0f, sculpt_delta * 0.1f));
+                }
+                else if(brush_hover_valid)
+                {
+                    brush_display_xz[0] = brush_hover_xz[0];
+                    brush_display_xz[1] = brush_hover_xz[1];
+                    brush_active_flag   = 0.5f;  // Hovering
+                }
             }
-            else if(brush_hover_valid)
-            {
-                brush_display_xz[0] = brush_hover_xz[0];
-                brush_display_xz[1] = brush_hover_xz[1];
-                brush_active_flag   = 0.5f;  // Hovering
-            }
-        }
 
-        TerrainPC pc = {
-            .time        = (float)glfwGetTime(),
-            .heightScale = terrain_gui.height_scale,
-            .freq        = terrain_gui.freq,
-            .worldScale  = 1.0f,  // leave 1 unless you want bigger terrain
-            .mapMin      = {terrain_map_min[0], terrain_map_min[1]},
-            .mapMax      = {terrain_map_max[0], terrain_map_max[1]},
-            .noiseOffset = {terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]},
-            .brushXZ     = {brush_display_xz[0], brush_display_xz[1]},
-            .brushRadius = terrain_gui.brush_radius,
-            .brushActive = brush_active_flag,
-            .brushDelta  = brush_delta_vis,
-        };
-
-        render_instance_set_push_data(&terrain_inst, &pc, sizeof(TerrainPC));
-        render_instance_push(cmd, &terrain_inst);
-        render_draw_indexed_mesh(cmd, &terrain_gpu);
-
-        GrassPC gpc = {
-            .time         = (float)glfwGetTime(),
-            .heightScale  = terrain_gui.height_scale,
-            .freq         = terrain_gui.freq,
-            .worldScale   = 1.0f,
-            .mapMin       = {terrain_map_min[0], terrain_map_min[1]},
-            .mapMax       = {terrain_map_max[0], terrain_map_max[1]},
-            .noiseOffset  = {terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]},
-            .bladeHeight  = grass_gui.blade_height,
-            .bladeWidth   = grass_gui.blade_width,
-            .windStrength = grass_gui.wind_strength,
-            .density      = grass_gui.density,
-            .farDistance  = grass_gui.far_distance,
-            .pad0         = 0.0f,
-        };
-
-        render_instance_bind(cmd, &grass_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
-        render_instance_set_push_data(&grass_inst, &gpc, sizeof(GrassPC));
-        render_instance_push(cmd, &grass_inst);
-        vkCmdDraw(cmd, 6, GRASS_INSTANCE_COUNT, 0, 0);
-
-        if(water_gui.enabled)
-        {
-            WaterPC wpc = {
-                .time            = (float)glfwGetTime(),
-                .heightScale     = terrain_gui.height_scale,
-                .freq            = terrain_gui.freq,
-                .waterHeight     = water_gui.water_height,
-                .mapMin          = {terrain_map_min[0], terrain_map_min[1]},
-                .mapMax          = {terrain_map_max[0], terrain_map_max[1]},
-                .noiseOffset     = {terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]},
-                .depthFade       = water_gui.depth_fade,
-                .foamDistance    = water_gui.foam_distance,
-                .foamScale       = water_gui.foam_scale,
-                .foamSpeed       = water_gui.foam_speed,
-                .normalScale     = water_gui.normal_scale,
-                .specular        = water_gui.specular_enabled ? water_gui.specular : 0.0f,
-                .opacity         = water_gui.opacity,
-                .fresnelPower    = water_gui.fresnel_power,
-                .fresnelStrength = water_gui.fresnel_enabled ? water_gui.fresnel_strength : 0.0f,
-                .specPower       = water_gui.spec_power,
-                .pad0            = 0.0f,
-                .sunDirIntensity = {water_gui.sun_dir[0], water_gui.sun_dir[1], water_gui.sun_dir[2], water_gui.sun_intensity},
+            TerrainPC pc = {
+                .time        = (float)glfwGetTime(),
+                .heightScale = terrain_gui.height_scale,
+                .freq        = terrain_gui.freq,
+                .worldScale  = 1.0f,  // leave 1 unless you want bigger terrain
+                .mapMin      = {terrain_map_min[0], terrain_map_min[1]},
+                .mapMax      = {terrain_map_max[0], terrain_map_max[1]},
+                .noiseOffset = {terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]},
+                .brushXZ     = {brush_display_xz[0], brush_display_xz[1]},
+                .brushRadius = terrain_gui.brush_radius,
+                .brushActive = brush_active_flag,
+                .brushDelta  = brush_delta_vis,
             };
 
-            vec3  sun_dir = {wpc.sunDirIntensity[0], wpc.sunDirIntensity[1], wpc.sunDirIntensity[2]};
-            float sun_len = glm_vec3_norm(sun_dir);
-            if(sun_len < 1e-3f)
-            {
-                sun_dir[0] = 0.3f;
-                sun_dir[1] = 1.0f;
-                sun_dir[2] = 0.2f;
-                sun_len    = glm_vec3_norm(sun_dir);
-            }
-            glm_vec3_scale(sun_dir, 1.0f / sun_len, sun_dir);
-            wpc.sunDirIntensity[0] = sun_dir[0];
-            wpc.sunDirIntensity[1] = sun_dir[1];
-            wpc.sunDirIntensity[2] = sun_dir[2];
-
-            render_instance_bind(cmd, &water_ro_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
-            render_instance_set_push_data(&water_ro_inst, &wpc, sizeof(WaterPC));
-            render_instance_push(cmd, &water_ro_inst);
+            render_instance_set_push_data(&terrain_inst, &pc, sizeof(TerrainPC));
+            render_instance_push(cmd, &terrain_inst);
             render_draw_indexed_mesh(cmd, &terrain_gpu);
-        }
 
-        vkCmdEndRendering(cmd);
+            GrassPC gpc = {
+                .time         = (float)glfwGetTime(),
+                .heightScale  = terrain_gui.height_scale,
+                .freq         = terrain_gui.freq,
+                .worldScale   = 1.0f,
+                .mapMin       = {terrain_map_min[0], terrain_map_min[1]},
+                .mapMax       = {terrain_map_max[0], terrain_map_max[1]},
+                .noiseOffset  = {terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]},
+                .bladeHeight  = grass_gui.blade_height,
+                .bladeWidth   = grass_gui.blade_width,
+                .windStrength = grass_gui.wind_strength,
+                .density      = grass_gui.density,
+                .farDistance  = grass_gui.far_distance,
+                .pad0         = 0.0f,
+            };
+
+            render_instance_bind(cmd, &grass_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
+            render_instance_set_push_data(&grass_inst, &gpc, sizeof(GrassPC));
+            render_instance_push(cmd, &grass_inst);
+            vkCmdDraw(cmd, 6, GRASS_INSTANCE_COUNT, 0, 0);
+
+            if(water_gui.enabled)
+            {
+                WaterPC wpc = {
+                    .time            = (float)glfwGetTime(),
+                    .heightScale     = terrain_gui.height_scale,
+                    .freq            = terrain_gui.freq,
+                    .waterHeight     = water_gui.water_height,
+                    .mapMin          = {terrain_map_min[0], terrain_map_min[1]},
+                    .mapMax          = {terrain_map_max[0], terrain_map_max[1]},
+                    .noiseOffset     = {terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]},
+                    .depthFade       = water_gui.depth_fade,
+                    .foamDistance    = water_gui.foam_distance,
+                    .foamScale       = water_gui.foam_scale,
+                    .foamSpeed       = water_gui.foam_speed,
+                    .normalScale     = water_gui.normal_scale,
+                    .specular        = water_gui.specular_enabled ? water_gui.specular : 0.0f,
+                    .opacity         = water_gui.opacity,
+                    .fresnelPower    = water_gui.fresnel_power,
+                    .fresnelStrength = water_gui.fresnel_enabled ? water_gui.fresnel_strength : 0.0f,
+                    .specPower       = water_gui.spec_power,
+                    .pad0            = 0.0f,
+                    .sunDirIntensity = {water_gui.sun_dir[0], water_gui.sun_dir[1], water_gui.sun_dir[2], water_gui.sun_intensity},
+                };
+
+                vec3  sun_dir = {wpc.sunDirIntensity[0], wpc.sunDirIntensity[1], wpc.sunDirIntensity[2]};
+                float sun_len = glm_vec3_norm(sun_dir);
+                if(sun_len < 1e-3f)
+                {
+                    sun_dir[0] = 0.3f;
+                    sun_dir[1] = 1.0f;
+                    sun_dir[2] = 0.2f;
+                    sun_len    = glm_vec3_norm(sun_dir);
+                }
+                glm_vec3_scale(sun_dir, 1.0f / sun_len, sun_dir);
+                wpc.sunDirIntensity[0] = sun_dir[0];
+                wpc.sunDirIntensity[1] = sun_dir[1];
+                wpc.sunDirIntensity[2] = sun_dir[2];
+
+                render_instance_bind(cmd, &water_ro_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
+                render_instance_set_push_data(&water_ro_inst, &wpc, sizeof(WaterPC));
+                render_instance_push(cmd, &water_ro_inst);
+                render_draw_indexed_mesh(cmd, &terrain_gpu);
+            }
+
+            vkCmdEndRendering(cmd);
+        }
 
         // Ensure terrain/water writes are visible to subsequent passes
         IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2390,10 +2378,13 @@ int main()
         rendering_gfx.pColorAttachments = &color_attach_gfx;
         rendering_gfx.pDepthAttachment  = &depth_attach_gfx;
 
-        vk_cmd_set_viewport_scissor(cmd, swap.extent);
-        vkCmdBeginRendering(cmd, &rendering_ui);
-        vk_gui_imgui_render(&gui, cmd);
-        vkCmdEndRendering(cmd);
+        GPU_SCOPE(cmd, P, "ui", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
+        {
+            vk_cmd_set_viewport_scissor(cmd, swap.extent);
+            vkCmdBeginRendering(cmd, &rendering_ui);
+            vk_gui_imgui_render(&gui, cmd);
+            vkCmdEndRendering(cmd);
+        }
 
         // Ensure UI color writes are visible to the mesh pass
         IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2485,13 +2476,9 @@ int main()
         {
             vk_debug_text_begin_frame(&dbg);
 
-            GpuStats s = stats[current_frame];
+            vk_debug_text_printf(&dbg, 1, 2, 2, pack_rgba8(255, 255, 0, 255), "CPU frame: %.3f ms", cpu_frame_ms[current_frame]);
 
-
-            vk_debug_text_printf(&dbg, 1, 20, 2, pack_rgba8(255, 255, 0, 255), "GPU frame: %.2f us (%.2f ms)",
-                                 s.frame_us, s.frame_us / 1000.0f);
-
-            vk_debug_text_printf(&dbg, 7, 2, 2, pack_rgba8(0, 255, 0, 255), "gfx: %.2f us | text: %.2f us", s.gfx_us, s.text_us);
+            gpu_prof_debug_text(P, &dbg, 1, 6, 2, pack_rgba8(255, 255, 0, 255), pack_rgba8(0, 255, 0, 255));
 
             vk_debug_text_flush(&dbg, cmd, swap.images[image_index], image_index);
         }
@@ -2549,7 +2536,8 @@ int main()
             }
         }
 
-        current_frame = (current_frame + 1) % MAX_FRAME_IN_FLIGHT;
+        cpu_frame_ms[current_frame] = (float)((glfwGetTime() - cpu_frame_start) * 1000.0);
+        current_frame                = (current_frame + 1) % MAX_FRAME_IN_FLIGHT;
     }
 
     vkDeviceWaitIdle(device);

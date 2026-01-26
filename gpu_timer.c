@@ -1,5 +1,6 @@
 
 #include "gpu_timer.h"
+#include "debugtext.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -33,6 +34,7 @@ bool gpu_prof_init(GpuProfiler* p, VkDevice device, VkPhysicalDevice gpu, uint32
         .capacity            = query_capacity,
         .cursor              = 0,
         .scope_count         = 0,
+        .resolved_count      = 0,
         .stack_top           = 0,
     };
 printf("gpu_prof_init: gpu arg=%p  p->gpu=%p\n", (void*)gpu, (void*)p->gpu);
@@ -115,6 +117,37 @@ void gpu_prof_scope_end(VkCommandBuffer cmd, GpuProfiler* p, VkPipelineStageFlag
     s->q_end     = prof_stamp(cmd, p, stage);
 }
 
+void gpu_prof_resolve(GpuProfiler* p)
+{
+    if(!p)
+        return;
+
+    p->resolved_count = 0;
+
+    for(uint32_t i = 0; i < p->scope_count; i++)
+    {
+        GpuScope* s = &p->scopes[i];
+        if(s->q_end == UINT32_MAX)
+            continue;
+
+        uint64_t a = 0, b = 0;
+        if(!get_ts(p, s->q_begin, &a))
+            continue;
+        if(!get_ts(p, s->q_end, &b))
+            continue;
+
+        double ns = (double)(b - a) * (double)p->timestamp_period_ns;
+
+        if(p->resolved_count < GPU_PROF_MAX_SCOPES)
+        {
+            GpuResolvedScope* r = &p->resolved[p->resolved_count++];
+            strncpy(r->name, s->name, GPU_PROF_NAME_MAX - 1);
+            r->name[GPU_PROF_NAME_MAX - 1] = 0;
+            r->us = (float)(ns / 1000.0);
+        }
+    }
+}
+
 bool gpu_prof_get_us(GpuProfiler* p, const char* name, float* out_us)
 {
     if(!p || !name || !out_us)
@@ -161,5 +194,21 @@ void gpu_prof_dump(GpuProfiler* p)
 
         double ns = (double)(b - a) * (double)p->timestamp_period_ns;
         printf("[GPU] %-16s %8.3f us\n", s->name, ns / 1000.0);
+    }
+}
+
+void gpu_prof_debug_text(GpuProfiler* p, VkDebugText* dt, int x, int y, int scale, uint32_t header_rgba, uint32_t row_rgba)
+{
+    if(!p || !dt)
+        return;
+
+    vk_debug_text_printf(dt, x, y, scale, header_rgba, "GPU Profiler");
+
+    int line = y + 2;
+    for(uint32_t i = 0; i < p->resolved_count; i++)
+    {
+        GpuResolvedScope* r = &p->resolved[i];
+        vk_debug_text_printf(dt, x, line, scale, row_rgba, "%s: %.3f ms", r->name, r->us / 1000.0f);
+        line += 2;
     }
 }
