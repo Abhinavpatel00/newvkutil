@@ -1,5 +1,3 @@
-
-#define STB_IMAGE_IMPLEMENTATION
 #include "external/stb/stb_image.h"
 
 #include "vk_gui.h"
@@ -296,47 +294,6 @@ static bool terrain_load_heightmap(const char*        path,
     res_destroy_buffer(allocator, &staging);
     return true;
 }
-
-static uint32_t load_bindless_texture_from_file(BindlessTextures*  bindless,
-                                                ResourceAllocator* allocator,
-                                                VkDevice           device,
-                                                VkQueue            queue,
-                                                VkCommandPool      pool,
-                                                const char*        path,
-                                                uint32_t           fallback_slot)
-{
-    int      w = 0, h = 0, comp = 0;
-    stbi_uc* pixels = stbi_load(path, &w, &h, &comp, 4);
-    if(!pixels)
-    {
-        printf("[WATER] Failed to load texture: %s\n", path);
-        return fallback_slot;
-    }
-
-    TextureResource tex = {0};
-    if(!bindless_textures_create_rgba8(allocator, device, queue, pool, (uint32_t)w, (uint32_t)h, pixels, &tex))
-    {
-        stbi_image_free(pixels);
-        printf("[WATER] Failed to create texture: %s\n", path);
-        return fallback_slot;
-    }
-
-    stbi_image_free(pixels);
-
-    uint32_t slot = bindless_textures_alloc_slot(bindless);
-    if(slot == 0)
-    {
-        bindless_textures_destroy_texture(allocator, device, &tex);
-        printf("[WATER] Bindless slots exhausted for %s\n", path);
-        return fallback_slot;
-    }
-
-    tex.bindless_index       = slot;
-    bindless->textures[slot] = tex;
-    bindless_textures_write(bindless, device, slot, tex.view, tex.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    return slot;
-}
-
 
 static inline float fractf(float x)
 {
@@ -877,63 +834,75 @@ int main()
     size_t         tex_size   = (size_t)tex_w * (size_t)tex_h * 4u;
     uint8_t*       tex_pixels = (uint8_t*)malloc(tex_size);
 
-    TextureResource tex_dummy    = {0};
-    TextureResource tex_checker  = {0};
-    TextureResource tex_gradient = {0};
-    TextureResource tex_black    = {0};
-
-    uint32_t checker_slot      = bindless_textures_alloc_slot(&bindless);
-    uint32_t gradient_slot     = bindless_textures_alloc_slot(&bindless);
-    uint32_t black_slot        = bindless_textures_alloc_slot(&bindless);
+    uint32_t dummy_slot        = 0;
+    uint32_t checker_slot      = 0;
+    uint32_t gradient_slot     = 0;
+    uint32_t black_slot        = 0;
     uint32_t water_normal_slot = 0;
     uint32_t water_foam_slot   = 0;
     uint32_t water_noise_slot  = 0;
 
-    if(checker_slot == 0 || gradient_slot == 0 || black_slot == 0)
+    // dummy slot 0 (solid white)
+    procedural_fill_solid_rgba8(tex_pixels, 1, 1, 255, 255, 255, 255);
+    if(!tex_create_from_rgba8_cpu(&bindless, &allocator, device, qf.graphics_queue, upload_pool, 1, 1, tex_pixels, 0, &dummy_slot))
     {
-        log_error("Bindless texture slots exhausted");
+        log_error("Failed to create dummy texture");
         return 1;
     }
 
-    // dummy slot 0 (solid white)
-    procedural_fill_solid_rgba8(tex_pixels, 1, 1, 255, 255, 255, 255);
-    bindless_textures_create_rgba8(&allocator, device, qf.graphics_queue, upload_pool, 1, 1, tex_pixels, &tex_dummy);
-    tex_dummy.bindless_index = 0;
-    bindless.textures[0]     = tex_dummy;
-    bindless_textures_write(&bindless, device, 0, tex_dummy.view, tex_dummy.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
     procedural_fill_checker_rgba8(tex_pixels, tex_w, tex_h, 16, 32, 32, 32, 220, 220, 220);
-    bindless_textures_create_rgba8(&allocator, device, qf.graphics_queue, upload_pool, tex_w, tex_h, tex_pixels, &tex_checker);
-    tex_checker.bindless_index      = checker_slot;
-    bindless.textures[checker_slot] = tex_checker;
-    bindless_textures_write(&bindless, device, checker_slot, tex_checker.view, tex_checker.sampler,
-                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if(!tex_create_from_rgba8_cpu(&bindless, &allocator, device, qf.graphics_queue, upload_pool, tex_w, tex_h, tex_pixels,
+                                  TEX_SLOT_AUTO, &checker_slot))
+    {
+        log_error("Failed to create checker texture");
+        return 1;
+    }
 
     procedural_fill_gradient_rgba8(tex_pixels, tex_w, tex_h);
-    bindless_textures_create_rgba8(&allocator, device, qf.graphics_queue, upload_pool, tex_w, tex_h, tex_pixels, &tex_gradient);
-    tex_gradient.bindless_index      = gradient_slot;
-    bindless.textures[gradient_slot] = tex_gradient;
-    bindless_textures_write(&bindless, device, gradient_slot, tex_gradient.view, tex_gradient.sampler,
-                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if(!tex_create_from_rgba8_cpu(&bindless, &allocator, device, qf.graphics_queue, upload_pool, tex_w, tex_h, tex_pixels,
+                                  TEX_SLOT_AUTO, &gradient_slot))
+    {
+        log_error("Failed to create gradient texture");
+        return 1;
+    }
 
     procedural_fill_solid_rgba8(tex_pixels, 1, 1, 0, 0, 0, 255);
-    bindless_textures_create_rgba8(&allocator, device, qf.graphics_queue, upload_pool, 1, 1, tex_pixels, &tex_black);
-    tex_black.bindless_index      = black_slot;
-    bindless.textures[black_slot] = tex_black;
-    bindless_textures_write(&bindless, device, black_slot, tex_black.view, tex_black.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if(!tex_create_from_rgba8_cpu(&bindless, &allocator, device, qf.graphics_queue, upload_pool, 1, 1, tex_pixels, TEX_SLOT_AUTO,
+                                  &black_slot))
+    {
+        log_error("Failed to create black texture");
+        return 1;
+    }
 
     free(tex_pixels);
 
     stbi_set_flip_vertically_on_load(1);
-    water_normal_slot =
-        load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
-                                        "unity-stylized-water/Assets/Stylized Water/Textures/SmallWaves.TGA", checker_slot);
-    water_foam_slot =
-        load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
-                                        "unity-stylized-water/Assets/Stylized Water/Textures/Seafoam.TGA", gradient_slot);
-    water_noise_slot =
-        load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
-                                        "unity-stylized-water/Assets/Stylized Water/Textures/SeaPattern.TGA", checker_slot);
+    if(!tex_create_from_file_rgba8(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
+                                   "unity-stylized-water/Assets/Stylized Water/Textures/SmallWaves.TGA", TEX_SLOT_AUTO,
+                                   &water_normal_slot))
+    {
+        printf("[WATER] Failed to load texture: %s\n",
+               "unity-stylized-water/Assets/Stylized Water/Textures/SmallWaves.TGA");
+        water_normal_slot = checker_slot;
+    }
+
+    if(!tex_create_from_file_rgba8(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
+                                   "unity-stylized-water/Assets/Stylized Water/Textures/Seafoam.TGA", TEX_SLOT_AUTO,
+                                   &water_foam_slot))
+    {
+        printf("[WATER] Failed to load texture: %s\n",
+               "unity-stylized-water/Assets/Stylized Water/Textures/Seafoam.TGA");
+        water_foam_slot = gradient_slot;
+    }
+
+    if(!tex_create_from_file_rgba8(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
+                                   "unity-stylized-water/Assets/Stylized Water/Textures/SeaPattern.TGA", TEX_SLOT_AUTO,
+                                   &water_noise_slot))
+    {
+        printf("[WATER] Failed to load texture: %s\n",
+               "unity-stylized-water/Assets/Stylized Water/Textures/SeaPattern.TGA");
+        water_noise_slot = checker_slot;
+    }
 
     VkDebugText dbg = {0};
     vk_debug_text_init(&dbg, device, &persistent_desc, &desc_cache, &pipe_cache, &swap, "compiledshaders/debug_text.comp.spv");
@@ -1220,8 +1189,16 @@ int main()
         {
             const char* path = scene.texturePaths[i];
             if(path && path[0] != '\0')
-                texture_slots[i] =
-                    load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool, path, 0);
+            {
+                uint32_t slot = 0;
+                if(!tex_create_from_file_rgba8(&bindless, &allocator, device, qf.graphics_queue, upload_pool, path, TEX_SLOT_AUTO,
+                                               &slot))
+                {
+                    printf("Failed to load texture: %s\n", path);
+                    slot = 0;
+                }
+                texture_slots[i] = slot;
+            }
             else
                 texture_slots[i] = 0;
         }

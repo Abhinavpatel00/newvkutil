@@ -1,5 +1,8 @@
 #include "bindlesstextures.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "external/stb/stb_image.h"
+
 #include "vk_barrier.h"
 #include "vk_cmd.h"
 
@@ -15,6 +18,52 @@ static uint32_t calc_mip_count(uint32_t w, uint32_t h)
         levels++;
     }
     return levels;
+}
+
+static bool resolve_slot(BindlessTextures* bt, uint32_t slot_hint, uint32_t* out_slot)
+{
+    if(!bt || !out_slot)
+        return false;
+
+    if(slot_hint == TEX_SLOT_AUTO)
+    {
+        uint32_t slot = bindless_textures_alloc_slot(bt);
+        if(slot == 0)
+            return false;
+
+        *out_slot = slot;
+        return true;
+    }
+
+    if(slot_hint >= bt->max_textures)
+        return false;
+
+    if(bt->textures[slot_hint].image != VK_NULL_HANDLE)
+        return false;
+
+    *out_slot = slot_hint;
+    return true;
+}
+
+static void release_slot(BindlessTextures* bt, uint32_t slot)
+{
+    if(!bt || slot == 0 || slot >= bt->max_textures)
+        return;
+
+    if(bt->free_count < MAX_BINDLESS_TEXTURES)
+        bt->free_list[bt->free_count++] = slot;
+}
+
+static void write_dummy_if_available(BindlessTextures* bt, VkDevice device, uint32_t slot)
+{
+    if(!bt || slot >= bt->max_textures)
+        return;
+
+    if(bt->textures[0].view && bt->textures[0].sampler)
+    {
+        bindless_textures_write(bt, device, slot, bt->textures[0].view, bt->textures[0].sampler,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
 }
 void bindless_textures_init(BindlessTextures* bt, VkDevice device, DescriptorAllocator* alloc, DescriptorLayoutCache* cache, uint32_t max_textures)
 {
@@ -312,4 +361,77 @@ void bindless_textures_destroy_texture(ResourceAllocator* allocator, VkDevice de
         vmaDestroyImage(allocator->allocator, tex->image, tex->allocation);
 
     *tex = (TextureResource){0};
+}
+
+bool tex_create_from_rgba8_cpu(BindlessTextures* bindless,
+                               ResourceAllocator* allocator,
+                               VkDevice device,
+                               VkQueue queue,
+                               VkCommandPool pool,
+                               uint32_t w,
+                               uint32_t h,
+                               const uint8_t* pixels,
+                               uint32_t slot_hint,
+                               uint32_t* out_slot)
+{
+    if(!bindless || !allocator || !pixels || !out_slot)
+        return false;
+
+    uint32_t slot = 0;
+    if(!resolve_slot(bindless, slot_hint, &slot))
+        return false;
+
+    TextureResource tex = {0};
+    if(!bindless_textures_create_rgba8(allocator, device, queue, pool, w, h, pixels, &tex))
+    {
+        if(slot_hint == TEX_SLOT_AUTO)
+            release_slot(bindless, slot);
+        return false;
+    }
+
+    tex.bindless_index         = slot;
+    bindless->textures[slot]   = tex;
+    bindless_textures_write(bindless, device, slot, tex.view, tex.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    *out_slot = slot;
+    return true;
+}
+
+bool tex_create_from_file_rgba8(BindlessTextures* bindless,
+                                ResourceAllocator* allocator,
+                                VkDevice device,
+                                VkQueue queue,
+                                VkCommandPool pool,
+                                const char* path,
+                                uint32_t slot_hint,
+                                uint32_t* out_slot)
+{
+    if(!path)
+        return false;
+
+    int      w = 0, h = 0, comp = 0;
+    stbi_uc* pixels = stbi_load(path, &w, &h, &comp, 4);
+    if(!pixels)
+        return false;
+
+    bool ok = tex_create_from_rgba8_cpu(bindless, allocator, device, queue, pool, (uint32_t)w, (uint32_t)h, pixels,
+                                        slot_hint, out_slot);
+    stbi_image_free(pixels);
+    return ok;
+}
+
+bool tex_destroy(BindlessTextures* bindless, ResourceAllocator* allocator, VkDevice device, uint32_t slot)
+{
+    if(!bindless || slot >= bindless->max_textures)
+        return false;
+
+    if(bindless->textures[slot].image == VK_NULL_HANDLE)
+        return false;
+
+    bindless_textures_destroy_texture(allocator, device, &bindless->textures[slot]);
+    if(slot != 0)
+    {
+        release_slot(bindless, slot);
+        write_dummy_if_available(bindless, device, slot);
+    }
+    return true;
 }
