@@ -8,7 +8,7 @@ SRC_C   := test.c vk_cmd.c helpers.c vk_startup.c vk_sync.c vk_queue.c \
 		   vk_swapchain.c volk.c vk_resources.c desc_write.c  vk_debug_text.c gpu_timer.c camera.c scene.c \
 		   bindlesstextures.c proceduraltextures.c vk_gui.c offset_allocator.c
 
-SRC_CPP := vma.cpp  $(wildcard external/meshoptimizer/src/*.cpp) \
+SRC_CPP :=tracy.cpp vma.cpp  $(wildcard external/meshoptimizer/src/*.cpp) \
 		   external/cimgui/cimgui.cpp external/cimgui/cimgui_impl.cpp \
 		   external/cimgui/imgui/imgui.cpp external/cimgui/imgui/imgui_draw.cpp \
 		   external/cimgui/imgui/imgui_demo.cpp external/cimgui/imgui/imgui_tables.cpp \

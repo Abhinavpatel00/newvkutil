@@ -2,6 +2,7 @@
 #define VK_DEFAULTS_H_
 
 #include "tinytypes.h"
+
 #include "external/xxHash/xxhash.h"
 
 typedef uint32_t Hash32;

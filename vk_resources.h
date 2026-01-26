@@ -4,6 +4,8 @@
 #include "offset_allocator.h"
 #include <vulkan/vulkan_core.h>
 
+
+
 // buffer is a region of memory used to store vertex data, index data, uniform data, and other types of data.
 typedef struct Buffer
 {
@@ -30,7 +32,14 @@ typedef struct BufferArena
     OA_Allocator allocator;
     VkDeviceSize alignment;
 } BufferArena;
+typedef struct GpuMeshBuffers
+{
+    Buffer vertex;
+    Buffer index;
 
+    uint32_t index_count;
+    uint32_t vertex_count;
+} GpuMeshBuffers;
 
 // the buffer exists logically as one big thing.
 //

@@ -123,36 +123,36 @@ void res_deinit(ResourceAllocator* ra)
     if(!ra->allocator)
         return;
 
-    {
-        char* stats = NULL;
-        vmaBuildStatsString(ra->allocator, &stats, VK_TRUE);
-        if(stats)
-        {
-            log_info("[vma] stats:\n%s", stats);
-            vmaFreeStatsString(ra->allocator, stats);
-        }
-
-        VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
-        memset(budgets, 0, sizeof(budgets));
-        vmaGetHeapBudgets(ra->allocator, budgets);
-
-        VkPhysicalDeviceMemoryProperties mem_props = {0};
-        vkGetPhysicalDeviceMemoryProperties(ra->physical_device, &mem_props);
-
-        for(uint32_t i = 0; i < mem_props.memoryHeapCount; i++)
-        {
-            if(budgets[i].budget > 0 || budgets[i].usage > 0)
-            {
-                log_info("[vma] heap %u: budget=%llu usage=%llu blockBytes=%llu allocationBytes=%llu",
-                         i,
-                         (unsigned long long)budgets[i].budget,
-                         (unsigned long long)budgets[i].usage,
-                         (unsigned long long)budgets[i].statistics.blockBytes,
-                         (unsigned long long)budgets[i].statistics.allocationBytes);
-            }
-        }
-    }
-
+    // {
+    //     char* stats = NULL;
+    //     vmaBuildStatsString(ra->allocator, &stats, VK_TRUE);
+    //     if(stats)
+    //     {
+    //         log_info("[vma] stats:\n%s", stats);
+    //         vmaFreeStatsString(ra->allocator, stats);
+    //     }
+    //
+    //     VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+    //     memset(budgets, 0, sizeof(budgets));
+    //     vmaGetHeapBudgets(ra->allocator, budgets);
+    //
+    //     VkPhysicalDeviceMemoryProperties mem_props = {0};
+    //     vkGetPhysicalDeviceMemoryProperties(ra->physical_device, &mem_props);
+    //
+    //     for(uint32_t i = 0; i < mem_props.memoryHeapCount; i++)
+    //     {
+    //         if(budgets[i].budget > 0 || budgets[i].usage > 0)
+    //         {
+    //             log_info("[vma] heap %u: budget=%llu usage=%llu blockBytes=%llu allocationBytes=%llu",
+    //                      i,
+    //                      (unsigned long long)budgets[i].budget,
+    //                      (unsigned long long)budgets[i].usage,
+    //                      (unsigned long long)budgets[i].statistics.blockBytes,
+    //                      (unsigned long long)budgets[i].statistics.allocationBytes);
+    //         }
+    //     }
+    // }
+    //
     for(uint32_t i = 0; i < VK_MAX_MEMORY_TYPES; i++)
     {
         if(ra->small_buffer_pools[i])

@@ -58,3 +58,6 @@
 [submodule "external/dds-ktx"]
 	path = external/dds-ktx
 	url = https://github.com/septag/dds-ktx.git
+[submodule "external/tracy"]
+	path = external/tracy
+	url = https://github.com/wolfpld/tracy.git
