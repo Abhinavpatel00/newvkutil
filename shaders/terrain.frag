@@ -110,15 +110,15 @@ void main()
         float ring = abs(d - pc.brushRadius);
         float ringMask = 1.0 - smoothstep(0.10, 0.0, ring);
 
-        vec3 hoverCol = vec3(0.3, 0.9, 1.0);
-        vec3 upCol    = vec3(0.2, 1.0, 0.3);
+        vec3 hoverCol = vec3(6.3, 0.9, 1.0);
+        vec3 upCol    = vec3(1.2, 1.0, 0.3);
         vec3 downCol  = vec3(1.0, 0.3, 0.2);
 
         float dirT = clamp(pc.brushDelta * 0.5 + 0.5, 0.0, 1.0);
         vec3 dragCol = mix(downCol, upCol, dirT);
         vec3 brushCol = (pc.brushActive > 0.75) ? dragCol : hoverCol;
 
-        col = mix(col, brushCol, ringMask * 0.75);
+        col = mix(col, brushCol, ringMask * 2.75);
     }
 
     outColor = vec4(col, 1.0);

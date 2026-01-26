@@ -268,6 +268,13 @@ typedef struct RenderObject
 // API
 // ------------------------------------------------------------
 
+void render_object_create(RenderObject*           obj,
+                           VkPipelineCache        pipeline_cache,
+                           DescriptorLayoutCache* desc_cache,
+                           PipelineLayoutCache*   pipe_cache,
+                           DescriptorAllocator*   alloc,
+                           const RenderObjectSpec* spec,
+                           uint32_t                frames_in_flight);
 BindingId render_bind_id(const char* name);
 
 RenderBinding render_object_get_binding(const RenderObject* obj, const char* name);
@@ -309,13 +316,10 @@ void render_resources_write_all(RenderResources* res,
                                 const RenderWriteTable* table,
                                 uint32_t frame_index);
 
-RenderObject render_object_create(VkDevice               device,
-                                  VkPipelineCache        pipeline_cache,
-                                  DescriptorLayoutCache* desc_cache,
-                                  PipelineLayoutCache*   pipe_cache,
-                                  DescriptorAllocator*   alloc,
-                                  const RenderObjectSpec* spec,
-                                  uint32_t                frames_in_flight);
+
+// Enable hot-reload for this object. MUST be called AFTER the object is stored
+// in its final location (not a temporary). The spec must have reloadable=true.
+void render_object_enable_hot_reload(RenderObject* obj, VkPipelineCache pipeline_cache, const RenderObjectSpec* spec);
 
 void render_object_destroy(VkDevice device, RenderObject* obj);
 
@@ -402,7 +406,8 @@ void render_object_push_constants(VkCommandBuffer cmd,
                                   const void* data,
                                   uint32_t size);
 
-RenderObjectInstance render_instance_create(RenderPipeline* pipe, RenderResources* res);
+
+void render_instance_create(RenderObjectInstance* inst, RenderPipeline* pipe, RenderResources* res);
 void render_instance_set_push_data(RenderObjectInstance* inst, const void* data, uint32_t size);
 void render_instance_bind(VkCommandBuffer cmd, const RenderObjectInstance* inst, VkPipelineBindPoint bind_point, uint32_t frame_index);
 void render_instance_push(VkCommandBuffer cmd, const RenderObjectInstance* inst);

@@ -12,12 +12,11 @@
 // PERFORMANCE OPTIMIZATIONS:
 //
 // 1. State Tracking: render_bind_sets() tracks the last bound pipeline
-//    and descriptor sets per thread, skipping redundant vkCmdBindPipeline 
+//    and descriptor sets per thread, skipping redundant vkCmdBindPipeline
 //    and vkCmdBindDescriptorSets calls. Reduces CPU overhead by 20-40%.
 //
 //    Usage: Call render_reset_state() once at the start of each command buffer
-//           to clear cached state. OPTIONAL but recommended for correct behavior
-//           when reusing command buffers.
+//           to clear cached state. REQUIRED unless the cache is per-command-buffer.
 //
 // 2. Cached Push Constant Stage Flags: Push constant stage flags are computed
 //    once during reflection and stored in RenderObjectReflection. Eliminates
@@ -42,11 +41,11 @@
 
 typedef struct RenderSetLayoutInfo
 {
-    VkDescriptorSetLayoutBinding bindings[SHADER_REFLECT_MAX_BINDINGS];
-    VkDescriptorBindingFlags     binding_flags[SHADER_REFLECT_MAX_BINDINGS];
-    uint32_t                     binding_count;
+    VkDescriptorSetLayoutBinding     bindings[SHADER_REFLECT_MAX_BINDINGS];
+    VkDescriptorBindingFlags         binding_flags[SHADER_REFLECT_MAX_BINDINGS];
+    uint32_t                         binding_count;
     VkDescriptorSetLayoutCreateFlags create_flags;
-    uint32_t                     variable_descriptor_count;
+    uint32_t                         variable_descriptor_count;
 } RenderSetLayoutInfo;
 
 static const RenderBindingInfo* render_find_binding_by_id(const RenderObjectReflection* refl, BindingId id);
@@ -198,9 +197,9 @@ static bool compile_glsl_to_spv(const char* src_path, const char* spv_path)
         FILE* f = fopen("compiledshaders/shader_errors.txt", "rb");
         if(f)
         {
-            char buf[1024];
+            char   buf[1024];
             size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-            buf[n] = 0;
+            buf[n]   = 0;
             log_error("glslc error: %s", buf);
             fclose(f);
         }
@@ -230,18 +229,21 @@ static bool is_buffer_descriptor(VkDescriptorType type)
 
 typedef struct RenderPipelineHotReloadEntry
 {
-    bool              reloadable;
-    bool              is_compute;
-    VkDevice          device;
-    VkPipelineCache   cache;
-    RenderPipeline*   pipeline;
-    RenderObjectSpec  spec;
-    char*             vert_path;
-    char*             frag_path;
-    char*             comp_path;
-    uint64_t          vert_mtime;
-    uint64_t          frag_mtime;
-    uint64_t          comp_mtime;
+    bool             reloadable;
+    bool             is_compute;
+    VkDevice         device;
+    VkPipelineCache  cache;
+    RenderPipeline*  pipeline;
+    VkPipelineLayout layout;
+    VkPipeline       pipeline_handle;
+    bool             warned_handle_mismatch;
+    RenderObjectSpec spec;
+    char*            vert_path;
+    char*            frag_path;
+    char*            comp_path;
+    uint64_t         vert_mtime;
+    uint64_t         frag_mtime;
+    uint64_t         comp_mtime;
 } RenderPipelineHotReloadEntry;
 
 static RenderPipelineHotReloadEntry* g_render_reload_entries = NULL;
@@ -306,7 +308,7 @@ static RenderObjectSpec render_object_spec_clone(const RenderObjectSpec* spec)
     }
     else
     {
-        out.spec_data = NULL;
+        out.spec_data      = NULL;
         out.spec_data_size = 0;
     }
 
@@ -329,12 +331,71 @@ static void render_reload_entries_push(const RenderPipelineHotReloadEntry* entry
     g_render_reload_entries[g_render_reload_count++] = *entry;
 }
 
-static VkPipeline render_pipeline_rebuild(RenderPipeline* pipe, VkPipelineCache cache, const RenderObjectSpec* spec)
+static RenderPipelineHotReloadEntry* render_pipeline_hot_reload_find(const RenderPipeline* pipe)
+{
+    if(!pipe || g_render_reload_count == 0)
+        return NULL;
+
+    for(size_t i = 0; i < g_render_reload_count; i++)
+    {
+        RenderPipelineHotReloadEntry* e = &g_render_reload_entries[i];
+        if(e->pipeline == pipe && e->reloadable)
+            return e;
+    }
+
+    return NULL;
+}
+
+static void render_pipeline_resolve_handles(const RenderPipeline* pipe, VkPipeline* out_pipe, VkPipelineLayout* out_layout)
+{
+    // Always prefer the live handles from the RenderPipeline struct directly.
+    // The hot-reload entry is only used as a fallback or for layout override.
+    VkPipeline       resolved_pipe   = pipe ? pipe->pipeline : VK_NULL_HANDLE;
+    VkPipelineLayout resolved_layout = pipe ? pipe->layout : VK_NULL_HANDLE;
+
+    // Hot-reload entry may have a different layout (after rebuild), use it if valid
+    RenderPipelineHotReloadEntry* e = render_pipeline_hot_reload_find(pipe);
+    if(e && e->layout != VK_NULL_HANDLE)
+        resolved_layout = e->layout;
+
+    if(out_pipe)
+        *out_pipe = resolved_pipe;
+    if(out_layout)
+        *out_layout = resolved_layout;
+}
+
+static void render_pipeline_hot_reload_unregister(RenderPipeline* pipe)
+{
+    if(!pipe || g_render_reload_count == 0)
+        return;
+
+    for(size_t i = 0; i < g_render_reload_count; i++)
+    {
+        RenderPipelineHotReloadEntry* e = &g_render_reload_entries[i];
+        if(e->pipeline == pipe)
+        {
+            e->reloadable      = false;
+            e->pipeline        = NULL;
+            e->pipeline_handle = VK_NULL_HANDLE;
+            e->layout          = VK_NULL_HANDLE;
+        }
+    }
+}
+
+static VkPipeline render_pipeline_rebuild(RenderPipeline*         pipe,
+                                          VkPipelineCache         cache,
+                                          const RenderObjectSpec* spec,
+                                          VkDevice                device_override,
+                                          VkPipelineLayout        layout_override)
 {
     if(!pipe || !spec)
         return VK_NULL_HANDLE;
 
-    VkDevice device = pipe->device;
+    VkDevice         device = (device_override != VK_NULL_HANDLE) ? device_override : pipe->device;
+    VkPipelineLayout layout = (layout_override != VK_NULL_HANDLE) ? layout_override : pipe->layout;
+
+    if(device == VK_NULL_HANDLE)
+        return VK_NULL_HANDLE;
 
     VkSpecializationInfo spec_info = {0};
     if(spec->spec_constant_count > 0 && spec->spec_map && spec->spec_data && spec->spec_data_size > 0)
@@ -355,17 +416,17 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline* pipe, VkPipelineCache 
         VkShaderModule comp_mod = create_shader_module(device, comp_code, comp_size);
 
         VkPipelineShaderStageCreateInfo stage = {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-            .module = comp_mod,
-            .pName  = "main",
+            .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage               = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module              = comp_mod,
+            .pName               = "main",
             .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
         };
 
         VkComputePipelineCreateInfo ci = {
             .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .stage  = stage,
-            .layout = pipe->layout,
+            .layout = layout,
         };
 
         VkPipeline new_pipe = VK_NULL_HANDLE;
@@ -399,17 +460,17 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline* pipe, VkPipelineCache 
 
     VkPipelineShaderStageCreateInfo stages[2] = {
         {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = vert_mod,
-            .pName  = "main",
+            .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage               = VK_SHADER_STAGE_VERTEX_BIT,
+            .module              = vert_mod,
+            .pName               = "main",
             .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
         },
         {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = frag_mod,
-            .pName  = "main",
+            .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage               = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module              = frag_mod,
+            .pName               = "main",
             .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
         },
     };
@@ -424,12 +485,12 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline* pipe, VkPipelineCache 
         .pVertexAttributeDescriptions    = NULL,
     };
 
-    VkVertexInputAttributeDescription attrs[16] = {0};
-    VkVertexInputBindingDescription   bindings[8] = {0};
-    VkVertexInputAttributeDescription* attrs_ptr = NULL;
-    VkVertexInputBindingDescription*   bindings_ptr = NULL;
-    uint32_t attr_count = 0;
-    uint32_t binding_count = 0;
+    VkVertexInputAttributeDescription  attrs[16]     = {0};
+    VkVertexInputBindingDescription    bindings[8]   = {0};
+    VkVertexInputAttributeDescription* attrs_ptr     = NULL;
+    VkVertexInputBindingDescription*   bindings_ptr  = NULL;
+    uint32_t                           attr_count    = 0;
+    uint32_t                           binding_count = 0;
 
     if(spec->use_vertex_input)
     {
@@ -469,10 +530,10 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline* pipe, VkPipelineCache 
         if(attr_count > 0)
         {
             binding_count = 1;
-            bindings[0] = (VkVertexInputBindingDescription){
-                .binding   = 0,
-                .stride    = stride,
-                .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+            bindings[0]   = (VkVertexInputBindingDescription){
+                  .binding   = 0,
+                  .stride    = stride,
+                  .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
             };
         }
 
@@ -527,7 +588,7 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline* pipe, VkPipelineCache 
     for(uint32_t i = 0; i < spec->color_attachment_count && i < 8; i++)
     {
         blend_atts[i] = (VkPipelineColorBlendAttachmentState){
-            .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
             .blendEnable         = spec->blend_enable ? VK_TRUE : VK_FALSE,
             .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
             .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
@@ -573,7 +634,7 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline* pipe, VkPipelineCache 
         .pDepthStencilState  = &depth_stencil,
         .pColorBlendState    = &blend,
         .pDynamicState       = &dynamic,
-        .layout              = pipe->layout,
+        .layout              = layout,
     };
 
     VkPipeline new_pipe = VK_NULL_HANDLE;
@@ -588,19 +649,31 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline* pipe, VkPipelineCache 
     return new_pipe;
 }
 
-static void render_pipeline_hot_reload_register(RenderPipeline* pipe,
-                                                VkPipelineCache cache,
-                                                const RenderObjectSpec* spec)
+static void render_pipeline_hot_reload_register(RenderPipeline* pipe, VkPipelineCache cache, const RenderObjectSpec* spec)
 {
     if(!pipe || !spec || !spec->reloadable)
         return;
 
+    if(pipe->device == VK_NULL_HANDLE)
+    {
+        log_error("[hot_reload] register skipped: pipeline device is NULL");
+        return;
+    }
+
+    if(pipe->pipeline == VK_NULL_HANDLE)
+    {
+        log_error("[hot_reload] register skipped: pipeline handle is NULL");
+        return;
+    }
+
     RenderPipelineHotReloadEntry entry = {0};
-    entry.reloadable = true;
-    entry.is_compute = (spec->comp_spv != NULL);
-    entry.device     = pipe->device;
-    entry.cache      = cache;
-    entry.pipeline   = pipe;
+    entry.reloadable                   = true;
+    entry.is_compute                   = (spec->comp_spv != NULL);
+    entry.device                       = pipe->device;
+    entry.cache                        = cache;
+    entry.pipeline                     = pipe;
+    entry.layout                       = pipe->layout;
+    entry.pipeline_handle              = pipe->pipeline;
 
     entry.spec = render_object_spec_clone(spec);
 
@@ -638,8 +711,29 @@ void render_pipeline_hot_reload_update(void)
     {
         RenderPipelineHotReloadEntry* e = &g_render_reload_entries[i];
 
-        if(!e->reloadable || !e->pipeline || !e->device)
+        if(!e->reloadable || !e->pipeline)
             continue;
+
+        // Sync entry handle with live pipeline handle if they diverged
+        if(e->pipeline_handle != VK_NULL_HANDLE && e->pipeline->pipeline != e->pipeline_handle)
+        {
+            if(!e->warned_handle_mismatch)
+            {
+                log_warn("[hot_reload] pipeline handle mismatch; syncing entry to live handle 0x%llx -> 0x%llx",
+                         (unsigned long long)e->pipeline_handle, (unsigned long long)e->pipeline->pipeline);
+                e->warned_handle_mismatch = true;
+            }
+            // The live pipeline handle is authoritative; update entry to match
+            // Do NOT destroy e->pipeline_handle here - it may already be destroyed or still valid elsewhere
+            e->pipeline_handle = e->pipeline->pipeline;
+        }
+
+        if(e->device == VK_NULL_HANDLE)
+        {
+            log_error("[hot_reload] entry has NULL device; disabling reload for this pipeline");
+            e->reloadable = false;
+            continue;
+        }
 
         if(e->is_compute)
         {
@@ -656,13 +750,23 @@ void render_pipeline_hot_reload_update(void)
 
             e->comp_mtime = comp_src_mtime;
 
-            VkPipeline new_pipe = render_pipeline_rebuild(e->pipeline, e->cache, &e->spec);
+            if(e->pipeline->layout == VK_NULL_HANDLE && e->layout == VK_NULL_HANDLE)
+            {
+                log_error("[hot_reload] compute pipeline layout is NULL; disabling reload for this pipeline");
+                e->reloadable = false;
+                continue;
+            }
+
+            log_info("[hot_reload] compute reload: %s", comp_src);
+            VkPipeline new_pipe = render_pipeline_rebuild(e->pipeline, e->cache, &e->spec, e->device, e->layout);
             if(new_pipe != VK_NULL_HANDLE)
             {
                 vkDeviceWaitIdle(e->device);
-                if(e->pipeline->pipeline)
-                    vkDestroyPipeline(e->device, e->pipeline->pipeline, NULL);
-                e->pipeline->pipeline = new_pipe;
+                if(e->pipeline_handle)
+                    vkDestroyPipeline(e->device, e->pipeline_handle, NULL);
+                e->pipeline_handle        = new_pipe;
+                e->pipeline->pipeline     = new_pipe;
+                e->warned_handle_mismatch = false;
             }
 
             continue;
@@ -695,13 +799,23 @@ void render_pipeline_hot_reload_update(void)
         e->vert_mtime = vert_src_mtime;
         e->frag_mtime = frag_src_mtime;
 
-        VkPipeline new_pipe = render_pipeline_rebuild(e->pipeline, e->cache, &e->spec);
+        if(e->pipeline->layout == VK_NULL_HANDLE && e->layout == VK_NULL_HANDLE)
+        {
+            log_error("[hot_reload] graphics pipeline layout is NULL; disabling reload for this pipeline");
+            e->reloadable = false;
+            continue;
+        }
+
+        log_info("[hot_reload] graphics reload: %s | %s", vert_src, frag_src);
+        VkPipeline new_pipe = render_pipeline_rebuild(e->pipeline, e->cache, &e->spec, e->device, e->layout);
         if(new_pipe != VK_NULL_HANDLE)
         {
             vkDeviceWaitIdle(e->device);
-            if(e->pipeline->pipeline)
-                vkDestroyPipeline(e->device, e->pipeline->pipeline, NULL);
-            e->pipeline->pipeline = new_pipe;
+            if(e->pipeline_handle)
+                vkDestroyPipeline(e->device, e->pipeline_handle, NULL);
+            e->pipeline_handle        = new_pipe;
+            e->pipeline->pipeline     = new_pipe;
+            e->warned_handle_mismatch = false;
         }
     }
 }
@@ -754,10 +868,7 @@ static bool str_contains_case(const char* s, const char* token)
     return false;
 }
 
-static char* sanitize_binding_name(const char* name,
-                                  bool* out_bindless,
-                                  bool* out_per_frame,
-                                  bool* out_update_after_bind)
+static char* sanitize_binding_name(const char* name, bool* out_bindless, bool* out_per_frame, bool* out_update_after_bind)
 {
     if(out_bindless)
         *out_bindless = false;
@@ -854,35 +965,27 @@ uint32_t render_write_list_count(const RenderWriteList* list)
     return (uint32_t)arrlen(list->writes);
 }
 
-void render_write_list_buffer(RenderWriteList* list,
-                              RenderBinding   binding,
-                              VkBuffer        buffer,
-                              VkDeviceSize    offset,
-                              VkDeviceSize    range)
+void render_write_list_buffer(RenderWriteList* list, RenderBinding binding, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range)
 {
     if(!list || binding.id == 0)
         return;
 
     RenderWriteId w = {
-        .id   = binding.id,
-        .type = RENDER_WRITE_BUFFER,
+        .id       = binding.id,
+        .type     = RENDER_WRITE_BUFFER,
         .data.buf = {buffer, offset, range},
     };
     arrpush(list->writes, w);
 }
 
-void render_write_list_image(RenderWriteList* list,
-                             RenderBinding   binding,
-                             VkImageView     view,
-                             VkSampler       sampler,
-                             VkImageLayout   layout)
+void render_write_list_image(RenderWriteList* list, RenderBinding binding, VkImageView view, VkSampler sampler, VkImageLayout layout)
 {
     if(!list || binding.id == 0)
         return;
 
     RenderWriteId w = {
-        .id   = binding.id,
-        .type = RENDER_WRITE_IMAGE,
+        .id       = binding.id,
+        .type     = RENDER_WRITE_IMAGE,
         .data.img = {view, sampler, layout},
     };
     arrpush(list->writes, w);
@@ -984,27 +1087,27 @@ static void build_reflection_and_layouts(const RenderObjectSpec* spec,
 
     for(uint32_t s = 0; s < set_count; s++)
     {
-        const ReflectedDescriptorSet* set = &merged->sets[s];
+        const ReflectedDescriptorSet* set  = &merged->sets[s];
         RenderSetLayoutInfo*          info = &set_infos[s];
 
-        info->binding_count = 0;
-        info->create_flags = 0;
+        info->binding_count             = 0;
+        info->create_flags              = 0;
         info->variable_descriptor_count = 0;
 
         for(uint32_t b = 0; b < set->binding_count && b < SHADER_REFLECT_MAX_BINDINGS; b++)
         {
-            const ReflectedBinding* src = &set->bindings[b];
-            bool bindless_tag = false;
-            bool per_frame_tag = false;
-            bool update_after_bind_tag = false;
+            const ReflectedBinding* src                   = &set->bindings[b];
+            bool                    bindless_tag          = false;
+            bool                    per_frame_tag         = false;
+            bool                    update_after_bind_tag = false;
 
             char* clean_name = sanitize_binding_name(src->name, &bindless_tag, &per_frame_tag, &update_after_bind_tag);
 
             VkDescriptorSetLayoutBinding binding = {
-                .binding         = src->binding,
-                .descriptorType  = src->descriptor_type,
-                .descriptorCount = src->descriptor_count,
-                .stageFlags      = src->stage_flags,
+                .binding            = src->binding,
+                .descriptorType     = src->descriptor_type,
+                .descriptorCount    = src->descriptor_count,
+                .stageFlags         = src->stage_flags,
                 .pImmutableSamplers = NULL,
             };
 
@@ -1014,10 +1117,11 @@ static void build_reflection_and_layouts(const RenderObjectSpec* spec,
             VkDescriptorBindingFlags flags = 0;
 
             bool wants_bindless = (spec->use_bindless_if_available == VK_TRUE) || bindless_tag;
-            bool wants_uab = update_after_bind_tag;
+            bool wants_uab      = update_after_bind_tag;
 
-            bool bindless_candidate = wants_bindless && is_image_descriptor(binding.descriptorType) &&
-                                      (src->descriptor_count == 0 || bindless_tag || str_contains_case(src->name, "u_textures"));
+            bool bindless_candidate =
+                wants_bindless && is_image_descriptor(binding.descriptorType)
+                && (src->descriptor_count == 0 || bindless_tag || str_contains_case(src->name, "u_textures"));
 
             if(bindless_candidate)
                 wants_uab = true;
@@ -1043,7 +1147,7 @@ static void build_reflection_and_layouts(const RenderObjectSpec* spec,
             if(flags & VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT)
                 info->create_flags |= VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
 
-            info->bindings[info->binding_count] = binding;
+            info->bindings[info->binding_count]      = binding;
             info->binding_flags[info->binding_count] = flags;
             info->binding_count++;
 
@@ -1070,17 +1174,17 @@ static void build_reflection_and_layouts(const RenderObjectSpec* spec,
     if(out_refl->push_constant_count > SHADER_REFLECT_MAX_PUSH)
         out_refl->push_constant_count = SHADER_REFLECT_MAX_PUSH;
 
-    uint32_t max_size = 0;
-    VkShaderStageFlags stages = 0;
+    uint32_t           max_size = 0;
+    VkShaderStageFlags stages   = 0;
     for(uint32_t i = 0; i < out_refl->push_constant_count; i++)
     {
         out_refl->push_constants[i] = merged->push_constants[i];
-        uint32_t end = merged->push_constants[i].offset + merged->push_constants[i].size;
+        uint32_t end                = merged->push_constants[i].offset + merged->push_constants[i].size;
         if(end > max_size)
             max_size = end;
         stages |= merged->push_constants[i].stageFlags;
     }
-    out_refl->push_constant_size = max_size;
+    out_refl->push_constant_size   = max_size;
     out_refl->push_constant_stages = stages;
 }
 
@@ -1091,8 +1195,8 @@ static void render_resources_ensure_set_array(RenderResources* res)
 
     uint32_t frames = res->per_frame_sets == VK_TRUE ? (res->frames_in_flight ? res->frames_in_flight : 1u) : 1u;
     uint32_t total  = res->set_count * frames;
-    res->sets = (VkDescriptorSet*)calloc(total, sizeof(VkDescriptorSet));
-    res->owns_sets = true;
+    res->sets       = (VkDescriptorSet*)calloc(total, sizeof(VkDescriptorSet));
+    res->owns_sets  = true;
 }
 
 static void render_resources_ensure_allocated(RenderResources* res, const RenderPipeline* pipe)
@@ -1103,8 +1207,7 @@ static void render_resources_ensure_allocated(RenderResources* res, const Render
     if(!res->allocator)
         return;
 
-    RenderResources alloced = render_resources_alloc(res->device, pipe, res->allocator,
-                                                     res->frames_in_flight, res->per_frame_sets);
+    RenderResources alloced = render_resources_alloc(res->device, pipe, res->allocator, res->frames_in_flight, res->per_frame_sets);
 
     if(res->external_set_mask && res->sets)
     {
@@ -1120,13 +1223,10 @@ static void render_resources_ensure_allocated(RenderResources* res, const Render
         free(res->sets);
 
     alloced.written = res->written;
-    *res = alloced;
+    *res            = alloced;
 }
 
-static inline VkDescriptorSet get_frame_set(RenderResources* res,
-                                     const RenderPipeline* pipe,
-                                     uint32_t set_index,
-                                     uint32_t frame_index)
+static inline VkDescriptorSet get_frame_set(RenderResources* res, const RenderPipeline* pipe, uint32_t set_index, uint32_t frame_index)
 {
     if(!res || set_index >= res->set_count)
         return VK_NULL_HANDLE;
@@ -1148,62 +1248,40 @@ static inline VkDescriptorSet get_frame_set(RenderResources* res,
 }
 
 // State tracking for optimized binding (per-command-buffer)
-static __thread struct {
-    VkPipeline last_graphics_pipeline;
-    VkPipeline last_compute_pipeline;
-    VkDescriptorSet last_sets[SHADER_REFLECT_MAX_SETS];
-    VkPipelineLayout last_layout;
+static __thread struct
+{
+    VkPipeline          last_graphics_pipeline;
+    VkPipeline          last_compute_pipeline;
+    VkDescriptorSet     last_sets[SHADER_REFLECT_MAX_SETS];
+    VkPipelineLayout    last_layout;
     VkPipelineBindPoint last_bind_point;
 } g_render_state = {0};
 
-static void render_bind_sets(VkCommandBuffer cmd,
-                             const RenderPipeline* pipe,
-                             const RenderResources* res,
-                             VkPipelineBindPoint bind_point,
-                             uint32_t frame_index)
+static void render_bind_sets(VkCommandBuffer cmd, const RenderPipeline* pipe, const RenderResources* res, VkPipelineBindPoint bind_point, uint32_t frame_index)
 {
-    if(!pipe || !res || pipe->layout == VK_NULL_HANDLE)
+    if(!pipe || !res)
         return;
 
     VkDescriptorSet sets[SHADER_REFLECT_MAX_SETS] = {0};
-    uint32_t        set_count = MIN(pipe->set_count, SHADER_REFLECT_MAX_SETS);
+    uint32_t        set_count                     = MIN(pipe->set_count, SHADER_REFLECT_MAX_SETS);
 
     for(uint32_t i = 0; i < set_count; i++)
         sets[i] = get_frame_set((RenderResources*)res, pipe, i, frame_index);
 
-    // State tracking: bind pipeline if changed OR bind point switched
-    VkPipeline* last_pipe = (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) 
-                             ? &g_render_state.last_graphics_pipeline
-                             : &g_render_state.last_compute_pipeline;
-    
-    bool pipeline_changed = (*last_pipe != pipe->pipeline);
-    bool bind_point_changed = (g_render_state.last_bind_point != bind_point);
-    
-    if(pipeline_changed || bind_point_changed) {
-        vkCmdBindPipeline(cmd, bind_point, pipe->pipeline);
-        *last_pipe = pipe->pipeline;
-        g_render_state.last_bind_point = bind_point;
+    VkPipeline       resolved_pipe   = VK_NULL_HANDLE;
+    VkPipelineLayout resolved_layout = VK_NULL_HANDLE;
+    render_pipeline_resolve_handles(pipe, &resolved_pipe, &resolved_layout);
+
+    if(resolved_pipe == VK_NULL_HANDLE || resolved_layout == VK_NULL_HANDLE)
+    {
+        log_error("[render_bind_sets] NULL pipeline (0x%llx) or layout (0x%llx), skipping bind",
+                  (unsigned long long)resolved_pipe, (unsigned long long)resolved_layout);
+        return;
     }
 
-    // State tracking: only bind changed descriptor sets
-    bool layout_changed = (g_render_state.last_layout != pipe->layout);
-    
-    // Must rebind all sets if layout or bind point changed
-    if(layout_changed || bind_point_changed) {
-        // Layout changed, bind all sets
-        vkCmdBindDescriptorSets(cmd, bind_point, pipe->layout, 0, set_count, sets, 0, NULL);
-        for(uint32_t i = 0; i < set_count; i++)
-            g_render_state.last_sets[i] = sets[i];
-        g_render_state.last_layout = pipe->layout;
-    } else {
-        // Bind only changed sets individually
-        for(uint32_t i = 0; i < set_count; i++) {
-            if(g_render_state.last_sets[i] != sets[i]) {
-                vkCmdBindDescriptorSets(cmd, bind_point, pipe->layout, i, 1, &sets[i], 0, NULL);
-                g_render_state.last_sets[i] = sets[i];
-            }
-        }
-    }
+    // State tracking disabled for debugging: always bind everything.
+    vkCmdBindPipeline(cmd, bind_point, resolved_pipe);
+    vkCmdBindDescriptorSets(cmd, bind_point, resolved_layout, 0, set_count, sets, 0, NULL);
 }
 
 static void render_resources_mark_written(RenderResources* res, BindingId id)
@@ -1224,14 +1302,14 @@ static bool render_resources_has_written(RenderResources* res, BindingId id)
 // Pipeline
 // ------------------------------------------------------------
 
-RenderPipeline render_pipeline_create(VkDevice               device,
-                                     VkPipelineCache        pipeline_cache,
-                                     DescriptorLayoutCache* desc_cache,
-                                     PipelineLayoutCache*   pipe_cache,
-                                     const RenderObjectSpec* spec)
+RenderPipeline render_pipeline_create(VkDevice                device,
+                                      VkPipelineCache         pipeline_cache,
+                                      DescriptorLayoutCache*  desc_cache,
+                                      PipelineLayoutCache*    pipe_cache,
+                                      const RenderObjectSpec* spec)
 {
     RenderPipeline out = {0};
-    out.device = device;
+    out.device         = device;
 
     if(!spec)
         return out;
@@ -1240,22 +1318,19 @@ RenderPipeline render_pipeline_create(VkDevice               device,
 
     if(spec)
     {
-        log_info("[render_pipeline_create] type=%s vert=%s frag=%s comp=%s", 
-                 is_compute ? "compute" : "graphics",
-                 spec->vert_spv ? spec->vert_spv : "(null)",
-                 spec->frag_spv ? spec->frag_spv : "(null)",
+        log_info("[render_pipeline_create] type=%s vert=%s frag=%s comp=%s", is_compute ? "compute" : "graphics",
+                 spec->vert_spv ? spec->vert_spv : "(null)", spec->frag_spv ? spec->frag_spv : "(null)",
                  spec->comp_spv ? spec->comp_spv : "(null)");
 
-        log_info("[render_pipeline_create] topology=%u cull=0x%x frontFace=%u poly=%u depthTest=%u depthWrite=%u depthCompare=%u blend=%u", 
-                 spec->topology, spec->cull_mode, spec->front_face, spec->polygon_mode,
-                 spec->depth_test, spec->depth_write, spec->depth_compare, spec->blend_enable);
+        log_info("[render_pipeline_create] topology=%u cull=0x%x frontFace=%u poly=%u depthTest=%u depthWrite=%u depthCompare=%u blend=%u",
+                 spec->topology, spec->cull_mode, spec->front_face, spec->polygon_mode, spec->depth_test,
+                 spec->depth_write, spec->depth_compare, spec->blend_enable);
 
-        log_info("[render_pipeline_create] use_vertex_input=%u colorAttachments=%u depthFormat=%u stencilFormat=%u", 
+        log_info("[render_pipeline_create] use_vertex_input=%u colorAttachments=%u depthFormat=%u stencilFormat=%u",
                  spec->use_vertex_input, spec->color_attachment_count, spec->depth_format, spec->stencil_format);
 
-        log_info("[render_pipeline_create] updateAfterBind=%u bindless=%u bindlessCount=%u perFrameSets=%u", 
-                 spec->allow_update_after_bind, spec->use_bindless_if_available,
-                 spec->bindless_descriptor_count, spec->per_frame_sets);
+        log_info("[render_pipeline_create] updateAfterBind=%u bindless=%u bindlessCount=%u perFrameSets=%u", spec->allow_update_after_bind,
+                 spec->use_bindless_if_available, spec->bindless_descriptor_count, spec->per_frame_sets);
     }
 
     void*  vert_code = NULL;
@@ -1319,28 +1394,22 @@ RenderPipeline render_pipeline_create(VkDevice               device,
     shader_reflect_merge(&merged, reflections, refl_count);
 
     RenderSetLayoutInfo set_infos[SHADER_REFLECT_MAX_SETS] = {0};
-    uint32_t            set_count = 0;
+    uint32_t            set_count                          = 0;
     build_reflection_and_layouts(spec, &merged, &out.refl, set_infos, &set_count);
 
-    out.set_count = set_count;
+    out.set_count   = set_count;
     out.set_layouts = (VkDescriptorSetLayout*)calloc(set_count, sizeof(VkDescriptorSetLayout));
 
     for(uint32_t i = 0; i < set_count; i++)
     {
-        out.set_layouts[i] = get_or_create_set_layout(desc_cache,
-                                                      set_infos[i].bindings,
-                                                      set_infos[i].binding_count,
-                                                      set_infos[i].create_flags,
-                                                      (set_infos[i].binding_count > 0) ? set_infos[i].binding_flags : NULL);
+        out.set_layouts[i] =
+            get_or_create_set_layout(desc_cache, set_infos[i].bindings, set_infos[i].binding_count, set_infos[i].create_flags,
+                                     (set_infos[i].binding_count > 0) ? set_infos[i].binding_flags : NULL);
         out.variable_descriptor_counts[i] = set_infos[i].variable_descriptor_count;
-        out.set_create_flags[i] = set_infos[i].create_flags;
+        out.set_create_flags[i]           = set_infos[i].create_flags;
     }
 
-    out.layout = pipeline_layout_cache_get(device,
-                                           pipe_cache,
-                                           out.set_layouts,
-                                           out.set_count,
-                                           out.refl.push_constants,
+    out.layout = pipeline_layout_cache_get(device, pipe_cache, out.set_layouts, out.set_count, out.refl.push_constants,
                                            out.refl.push_constant_count);
 
     VkSpecializationInfo spec_info = {0};
@@ -1357,10 +1426,10 @@ RenderPipeline render_pipeline_create(VkDevice               device,
         VkShaderModule comp_mod = create_shader_module(device, comp_code, comp_size);
 
         VkPipelineShaderStageCreateInfo stage = {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-            .module = comp_mod,
-            .pName  = "main",
+            .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage               = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module              = comp_mod,
+            .pName               = "main",
             .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
         };
 
@@ -1382,17 +1451,17 @@ RenderPipeline render_pipeline_create(VkDevice               device,
 
         VkPipelineShaderStageCreateInfo stages[2] = {
             {
-                .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                .stage  = VK_SHADER_STAGE_VERTEX_BIT,
-                .module = vert_mod,
-                .pName  = "main",
+                .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage               = VK_SHADER_STAGE_VERTEX_BIT,
+                .module              = vert_mod,
+                .pName               = "main",
                 .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
             },
             {
-                .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
-                .module = frag_mod,
-                .pName  = "main",
+                .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage               = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .module              = frag_mod,
+                .pName               = "main",
                 .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
             },
         };
@@ -1407,12 +1476,12 @@ RenderPipeline render_pipeline_create(VkDevice               device,
             .pVertexAttributeDescriptions    = NULL,
         };
 
-        VkVertexInputAttributeDescription attrs[16] = {0};
-        VkVertexInputBindingDescription   bindings[8] = {0};
-        VkVertexInputAttributeDescription* attrs_ptr = NULL;
-        VkVertexInputBindingDescription*   bindings_ptr = NULL;
-        uint32_t attr_count = 0;
-        uint32_t binding_count = 0;
+        VkVertexInputAttributeDescription  attrs[16]     = {0};
+        VkVertexInputBindingDescription    bindings[8]   = {0};
+        VkVertexInputAttributeDescription* attrs_ptr     = NULL;
+        VkVertexInputBindingDescription*   bindings_ptr  = NULL;
+        uint32_t                           attr_count    = 0;
+        uint32_t                           binding_count = 0;
 
         if(spec->use_vertex_input)
         {
@@ -1458,10 +1527,10 @@ RenderPipeline render_pipeline_create(VkDevice               device,
             if(attr_count > 0)
             {
                 binding_count = 1;
-                bindings[0] = (VkVertexInputBindingDescription){
-                    .binding   = 0,
-                    .stride    = stride,
-                    .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+                bindings[0]   = (VkVertexInputBindingDescription){
+                      .binding   = 0,
+                      .stride    = stride,
+                      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
                 };
             }
 
@@ -1470,20 +1539,19 @@ RenderPipeline render_pipeline_create(VkDevice               device,
 
             if(vert_reflect)
             {
-                log_info("[pipeline] vert=%s frag=%s use_vertex_input=1 attrs=%u bindings=%u", 
-                         spec->vert_spv ? spec->vert_spv : "(null)",
-                         spec->frag_spv ? spec->frag_spv : "(null)",
+                log_info("[pipeline] vert=%s frag=%s use_vertex_input=1 attrs=%u bindings=%u",
+                         spec->vert_spv ? spec->vert_spv : "(null)", spec->frag_spv ? spec->frag_spv : "(null)",
                          attr_count, binding_count);
 
                 for(uint32_t i = 0; i < attr_count; i++)
                 {
-                    log_info("[pipeline]  attr[%u] loc=%u binding=%u format=%u offset=%u", i,
-                             attrs[i].location, attrs[i].binding, attrs[i].format, attrs[i].offset);
+                    log_info("[pipeline]  attr[%u] loc=%u binding=%u format=%u offset=%u", i, attrs[i].location,
+                             attrs[i].binding, attrs[i].format, attrs[i].offset);
                 }
 
                 if(attr_count == 0)
                 {
-                    log_warn("[pipeline] use_vertex_input enabled but no vertex inputs reflected for vert=%s", 
+                    log_warn("[pipeline] use_vertex_input enabled but no vertex inputs reflected for vert=%s",
                              spec->vert_spv ? spec->vert_spv : "(null)");
                 }
             }
@@ -1496,7 +1564,7 @@ RenderPipeline render_pipeline_create(VkDevice               device,
 
         if(vertex_input.vertexAttributeDescriptionCount > 0 && vertex_input.vertexBindingDescriptionCount == 0)
         {
-            log_warn("[pipeline] vertex input attrs set but no bindings; forcing zero attrs for vert=%s", 
+            log_warn("[pipeline] vertex input attrs set but no bindings; forcing zero attrs for vert=%s",
                      spec->vert_spv ? spec->vert_spv : "(null)");
             vertex_input.vertexAttributeDescriptionCount = 0;
             vertex_input.pVertexAttributeDescriptions    = NULL;
@@ -1538,7 +1606,7 @@ RenderPipeline render_pipeline_create(VkDevice               device,
         for(uint32_t i = 0; i < spec->color_attachment_count && i < 8; i++)
         {
             blend_atts[i] = (VkPipelineColorBlendAttachmentState){
-                .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+                .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
                 .blendEnable         = spec->blend_enable ? VK_TRUE : VK_FALSE,
                 .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
                 .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
@@ -1587,10 +1655,8 @@ RenderPipeline render_pipeline_create(VkDevice               device,
             .layout              = out.layout,
         };
 
-        log_info("[pipeline] create gfx: vert=%s frag=%s vb=%u va=%u", 
-                 spec->vert_spv ? spec->vert_spv : "(null)",
-                 spec->frag_spv ? spec->frag_spv : "(null)",
-                 vertex_input.vertexBindingDescriptionCount,
+        log_info("[pipeline] create gfx: vert=%s frag=%s vb=%u va=%u", spec->vert_spv ? spec->vert_spv : "(null)",
+                 spec->frag_spv ? spec->frag_spv : "(null)", vertex_input.vertexBindingDescriptionCount,
                  vertex_input.vertexAttributeDescriptionCount);
 
         VK_CHECK(vkCreateGraphicsPipelines(device, pipeline_cache, 1, &ci, NULL, &out.pipeline));
@@ -1607,19 +1673,24 @@ RenderPipeline render_pipeline_create(VkDevice               device,
     free(frag_code);
     free(comp_code);
 
-    if(spec && spec->reloadable && out.pipeline != VK_NULL_HANDLE)
-        render_pipeline_hot_reload_register(&out, pipeline_cache, spec);
-
     return out;
 }
+
 
 void render_pipeline_destroy(VkDevice device, RenderPipeline* pipe)
 {
     if(!pipe)
         return;
 
-    if(pipe->pipeline)
-        vkDestroyPipeline(device, pipe->pipeline, NULL);
+    VkPipeline       resolved_pipe   = VK_NULL_HANDLE;
+    VkPipelineLayout resolved_layout = VK_NULL_HANDLE;
+    render_pipeline_resolve_handles(pipe, &resolved_pipe, &resolved_layout);
+
+    // Unregister FIRST so future resolve doesn't return dead handles
+    render_pipeline_hot_reload_unregister(pipe);
+
+    if(resolved_pipe)
+        vkDestroyPipeline(device, resolved_pipe, NULL);
 
     free(pipe->set_layouts);
     render_reflection_clear(&pipe->refl);
@@ -1630,11 +1701,7 @@ void render_pipeline_destroy(VkDevice device, RenderPipeline* pipe)
 // Resources
 // ------------------------------------------------------------
 
-RenderResources render_resources_alloc(VkDevice                   device,
-                                       const RenderPipeline*      pipe,
-                                       DescriptorAllocator*       alloc,
-                                       uint32_t                   frames_in_flight,
-                                       VkBool32                   per_frame_sets)
+RenderResources render_resources_alloc(VkDevice device, const RenderPipeline* pipe, DescriptorAllocator* alloc, uint32_t frames_in_flight, VkBool32 per_frame_sets)
 {
     (void)device;
 
@@ -1642,29 +1709,28 @@ RenderResources render_resources_alloc(VkDevice                   device,
     if(!pipe || !alloc)
         return res;
 
-    res.set_count = pipe->set_count;
-    res.frames_in_flight = (frames_in_flight == 0) ? 1 : frames_in_flight;
-    res.per_frame_sets = per_frame_sets;
-    res.owns_sets = true;
+    res.set_count         = pipe->set_count;
+    res.frames_in_flight  = (frames_in_flight == 0) ? 1 : frames_in_flight;
+    res.per_frame_sets    = per_frame_sets;
+    res.owns_sets         = true;
     res.external_set_mask = 0;
 
     uint32_t total_sets = res.set_count * ((res.per_frame_sets == VK_TRUE) ? res.frames_in_flight : 1);
 
-    res.device          = device;
-    res.allocator       = alloc;
-    res.allocated       = VK_FALSE;
-    res.sets            = (VkDescriptorSet*)calloc(total_sets, sizeof(VkDescriptorSet));
+    res.device    = device;
+    res.allocator = alloc;
+    res.allocated = VK_FALSE;
+    res.sets      = (VkDescriptorSet*)calloc(total_sets, sizeof(VkDescriptorSet));
     if(!res.sets)
         return res;
     res.allocated = VK_TRUE;
 
     for(uint32_t i = 0; i < total_sets; i++)
     {
-        uint32_t set_index = i % res.set_count;
+        uint32_t set_index      = i % res.set_count;
         uint32_t variable_count = pipe->variable_descriptor_counts[set_index];
 
-        if((pipe->set_create_flags[set_index] & VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT) &&
-           !alloc->update_after_bind)
+        if((pipe->set_create_flags[set_index] & VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT) && !alloc->update_after_bind)
         {
             continue;
         }
@@ -1688,10 +1754,10 @@ RenderResources render_resources_external(uint32_t set_count, const VkDescriptor
     if(set_count == 0 || !sets)
         return res;
 
-    res.set_count = set_count;
-    res.frames_in_flight = 1;
-    res.per_frame_sets = VK_FALSE;
-    res.owns_sets = true;
+    res.set_count         = set_count;
+    res.frames_in_flight  = 1;
+    res.per_frame_sets    = VK_FALSE;
+    res.owns_sets         = true;
     res.external_set_mask = 0;
 
     res.sets = (VkDescriptorSet*)calloc(set_count, sizeof(VkDescriptorSet));
@@ -1749,20 +1815,17 @@ void render_resources_destroy(RenderResources* res)
     *res = (RenderResources){0};
 }
 
-void render_resources_write_all(RenderResources* res,
-                                const RenderPipeline* pipe,
-                                const RenderWriteTable* table,
-                                uint32_t frame_index)
+void render_resources_write_all(RenderResources* res, const RenderPipeline* pipe, const RenderWriteTable* table, uint32_t frame_index)
 {
     if(!res || !pipe || !table || table->count == 0)
         return;
 
-    DescriptorWriter writers[SHADER_REFLECT_MAX_SETS] = {0};
-    bool has_writer[SHADER_REFLECT_MAX_SETS] = {0};
+    DescriptorWriter writers[SHADER_REFLECT_MAX_SETS]    = {0};
+    bool             has_writer[SHADER_REFLECT_MAX_SETS] = {0};
 
     for(uint32_t i = 0; i < table->count; i++)
     {
-        BindingId id = table->ids ? table->ids[i] : 0;
+        BindingId                id   = table->ids ? table->ids[i] : 0;
         const RenderBindingInfo* bind = render_find_binding_by_id(&pipe->refl, id);
         if(!bind)
         {
@@ -1796,9 +1859,9 @@ void render_resources_write_all(RenderResources* res,
                 continue;
             }
 
-            VkImageView view = table->views ? table->views[i] : VK_NULL_HANDLE;
-            VkSampler sampler = table->samplers ? table->samplers[i] : VK_NULL_HANDLE;
-            VkImageLayout layout = table->layouts ? table->layouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkImageView   view    = table->views ? table->views[i] : VK_NULL_HANDLE;
+            VkSampler     sampler = table->samplers ? table->samplers[i] : VK_NULL_HANDLE;
+            VkImageLayout layout  = table->layouts ? table->layouts[i] : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
             desc_writer_write_image(&writers[set_index], set, bind->binding, bind->descriptor_type, view, sampler, layout);
             render_resources_mark_written(res, bind->id);
@@ -1811,9 +1874,9 @@ void render_resources_write_all(RenderResources* res,
                 continue;
             }
 
-            VkBuffer buffer = table->buffers ? table->buffers[i] : VK_NULL_HANDLE;
+            VkBuffer     buffer = table->buffers ? table->buffers[i] : VK_NULL_HANDLE;
             VkDeviceSize offset = table->offsets ? table->offsets[i] : 0;
-            VkDeviceSize range = table->ranges ? table->ranges[i] : VK_WHOLE_SIZE;
+            VkDeviceSize range  = table->ranges ? table->ranges[i] : VK_WHOLE_SIZE;
 
             desc_writer_write_buffer(&writers[set_index], set, bind->binding, bind->descriptor_type, buffer, offset, range);
             render_resources_mark_written(res, bind->id);
@@ -1831,48 +1894,68 @@ void render_resources_write_all(RenderResources* res,
 // Render object (combined)
 // ------------------------------------------------------------
 
-RenderObject render_object_create(VkDevice               device,
-                                  VkPipelineCache        pipeline_cache,
-                                  DescriptorLayoutCache* desc_cache,
-                                  PipelineLayoutCache*   pipe_cache,
-                                  DescriptorAllocator*   alloc,
-                                  const RenderObjectSpec* spec,
-                                  uint32_t                frames_in_flight)
+void render_object_create(RenderObject*           obj,
+                          VkPipelineCache         pipeline_cache,
+                          DescriptorLayoutCache*  desc_cache,
+                          PipelineLayoutCache*    pipe_cache,
+                          DescriptorAllocator*    alloc,
+                          const RenderObjectSpec* spec,
+                          uint32_t                frames_in_flight)
 {
-    RenderObject obj = {0};
+
+    *obj = (RenderObject){0};
     if(spec)
     {
         log_info("[render_object_create] frames_in_flight=%u", frames_in_flight);
-        log_info("[render_object_create] vert=%s frag=%s comp=%s", 
-                 spec->vert_spv ? spec->vert_spv : "(null)",
-                 spec->frag_spv ? spec->frag_spv : "(null)",
-                 spec->comp_spv ? spec->comp_spv : "(null)");
+        log_info("[render_object_create] vert=%s frag=%s comp=%s", spec->vert_spv ? spec->vert_spv : "(null)",
+                 spec->frag_spv ? spec->frag_spv : "(null)", spec->comp_spv ? spec->comp_spv : "(null)");
     }
 
-    obj.pipeline = render_pipeline_create(device, pipeline_cache, desc_cache, pipe_cache, spec);
+    obj->pipeline = render_pipeline_create(alloc->device, pipeline_cache, desc_cache, pipe_cache, spec);
 
-    log_info("[render_object_create] pipeline handle=0x%llx layout=0x%llx set_count=%u", 
-             (unsigned long long)obj.pipeline.pipeline,
-             (unsigned long long)obj.pipeline.layout,
-             obj.pipeline.set_count);
+    log_info("[render_object_create] pipeline handle=0x%llx layout=0x%llx set_count=%u",
+             (unsigned long long)obj->pipeline.pipeline, (unsigned long long)obj->pipeline.layout, obj->pipeline.set_count);
 
+    if(spec && spec->reloadable)
+    {
+        //        render_pipeline_register_hot_reload(&obj->pipeline, pipeline_cache, desc_cache, pipe_cache, spec);
+
+        render_object_enable_hot_reload(obj, VK_NULL_HANDLE, spec);
+    }
     VkBool32 per_frame = spec ? spec->per_frame_sets : VK_FALSE;
-    if(spec && spec->per_frame_sets == VK_FALSE && obj.pipeline.refl.per_frame_hint == VK_TRUE)
+
+    if(spec && spec->per_frame_sets == VK_FALSE && obj->pipeline.refl.per_frame_hint == VK_TRUE)
         per_frame = VK_TRUE;
 
-    obj.resources = (RenderResources){
-        .set_count        = obj.pipeline.set_count,
-        .frames_in_flight = frames_in_flight,
-        .per_frame_sets   = per_frame,
-        .owns_sets        = true,
+
+    obj->resources = (RenderResources){
+        .set_count         = obj->pipeline.set_count,
+        .frames_in_flight  = frames_in_flight,
+        .per_frame_sets    = per_frame,
+        .owns_sets         = true,
         .external_set_mask = 0,
-        .allocator        = alloc,
-        .device           = device,
-        .allocated        = VK_FALSE,
+        .allocator         = alloc,
+        .device            = alloc->device,
+        .allocated         = VK_FALSE,
     };
-    log_info("[render_object_create] resources per_frame=%u external_set_mask=0x%x", 
-             obj.resources.per_frame_sets, obj.resources.external_set_mask);
-    return obj;
+    log_info("[render_object_create] resources per_frame=%u external_set_mask=0x%x", obj->resources.per_frame_sets,
+             obj->resources.external_set_mask);
+}
+
+void render_object_enable_hot_reload(RenderObject* obj, VkPipelineCache pipeline_cache, const RenderObjectSpec* spec)
+{
+    if(!obj || !spec || !spec->reloadable)
+        return;
+
+    if(obj->pipeline.pipeline == VK_NULL_HANDLE)
+    {
+        log_warn("[render_object_enable_hot_reload] pipeline is NULL, skipping");
+        return;
+    }
+
+    render_pipeline_hot_reload_register(&obj->pipeline, pipeline_cache, spec);
+    log_info("[render_object_enable_hot_reload] registered pipeline 0x%llx for hot-reload",
+             (unsigned long long)obj->pipeline.pipeline);
 }
 
 void render_object_destroy(VkDevice device, RenderObject* obj)
@@ -1880,19 +1963,20 @@ void render_object_destroy(VkDevice device, RenderObject* obj)
     if(!obj)
         return;
 
+
     render_pipeline_destroy(device, &obj->pipeline);
     render_resources_destroy(&obj->resources);
     *obj = (RenderObject){0};
 }
 
-void render_object_write_buffer(RenderObject*   obj,
-                                const char*     name,
-                                uint32_t        set,
-                                uint32_t        binding,
-                                VkBuffer        buffer,
-                                VkDeviceSize    offset,
-                                VkDeviceSize    range,
-                                uint32_t        frame_index)
+void render_object_write_buffer(RenderObject* obj,
+                                const char*   name,
+                                uint32_t      set,
+                                uint32_t      binding,
+                                VkBuffer      buffer,
+                                VkDeviceSize  offset,
+                                VkDeviceSize  range,
+                                uint32_t      frame_index)
 {
     if(!obj)
         return;
@@ -1923,12 +2007,7 @@ void render_object_write_buffer(RenderObject*   obj,
     render_resources_mark_written(&obj->resources, bind->id);
 }
 
-void render_object_write_buffer_id(RenderObject*   obj,
-                                   BindingId       id,
-                                   VkBuffer        buffer,
-                                   VkDeviceSize    offset,
-                                   VkDeviceSize    range,
-                                   uint32_t        frame_index)
+void render_object_write_buffer_id(RenderObject* obj, BindingId id, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range, uint32_t frame_index)
 {
     if(!obj)
         return;
@@ -1954,12 +2033,7 @@ void render_object_write_buffer_id(RenderObject*   obj,
     render_resources_mark_written(&obj->resources, bind->id);
 }
 
-void render_object_write_buffer_binding(RenderObject*   obj,
-                                        RenderBinding   binding,
-                                        VkBuffer        buffer,
-                                        VkDeviceSize    offset,
-                                        VkDeviceSize    range,
-                                        uint32_t        frame_index)
+void render_object_write_buffer_binding(RenderObject* obj, RenderBinding binding, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range, uint32_t frame_index)
 {
     if(binding.id == 0)
     {
@@ -1968,14 +2042,14 @@ void render_object_write_buffer_binding(RenderObject*   obj,
     }
     render_object_write_buffer_id(obj, binding.id, buffer, offset, range, frame_index);
 }
-void render_object_write_image(RenderObject*   obj,
-                               const char*     name,
-                               uint32_t        set,
-                               uint32_t        binding,
-                               VkImageView     view,
-                               VkSampler       sampler,
-                               VkImageLayout   layout,
-                               uint32_t        frame_index)
+void render_object_write_image(RenderObject* obj,
+                               const char*   name,
+                               uint32_t      set,
+                               uint32_t      binding,
+                               VkImageView   view,
+                               VkSampler     sampler,
+                               VkImageLayout layout,
+                               uint32_t      frame_index)
 {
     if(!obj)
         return;
@@ -2006,12 +2080,7 @@ void render_object_write_image(RenderObject*   obj,
     render_resources_mark_written(&obj->resources, bind->id);
 }
 
-void render_object_write_image_id(RenderObject*   obj,
-                                  BindingId       id,
-                                  VkImageView     view,
-                                  VkSampler       sampler,
-                                  VkImageLayout   layout,
-                                  uint32_t        frame_index)
+void render_object_write_image_id(RenderObject* obj, BindingId id, VkImageView view, VkSampler sampler, VkImageLayout layout, uint32_t frame_index)
 {
     if(!obj)
         return;
@@ -2037,12 +2106,7 @@ void render_object_write_image_id(RenderObject*   obj,
     render_resources_mark_written(&obj->resources, bind->id);
 }
 
-void render_object_write_image_binding(RenderObject*   obj,
-                                       RenderBinding   binding,
-                                       VkImageView     view,
-                                       VkSampler       sampler,
-                                       VkImageLayout   layout,
-                                       uint32_t        frame_index)
+void render_object_write_image_binding(RenderObject* obj, RenderBinding binding, VkImageView view, VkSampler sampler, VkImageLayout layout, uint32_t frame_index)
 {
     if(binding.id == 0)
     {
@@ -2056,12 +2120,12 @@ void render_object_write_all(RenderObject* obj, const RenderWrite* writes, uint3
     if(!obj || !writes || write_count == 0)
         return;
 
-    DescriptorWriter writers[SHADER_REFLECT_MAX_SETS] = {0};
-    bool has_writer[SHADER_REFLECT_MAX_SETS] = {0};
+    DescriptorWriter writers[SHADER_REFLECT_MAX_SETS]    = {0};
+    bool             has_writer[SHADER_REFLECT_MAX_SETS] = {0};
 
     for(uint32_t i = 0; i < write_count; i++)
     {
-        const RenderWrite* w = &writes[i];
+        const RenderWrite*       w    = &writes[i];
         const RenderBindingInfo* bind = w->name ? render_find_binding_by_name(&obj->pipeline.refl, w->name) : NULL;
 
         if(!bind)
@@ -2087,13 +2151,8 @@ void render_object_write_all(RenderObject* obj, const RenderWrite* writes, uint3
             if(!is_image_descriptor(bind->descriptor_type))
                 continue;
 
-            desc_writer_write_image(&writers[set_index],
-                                    set_handle,
-                                    bind->binding,
-                                    bind->descriptor_type,
-                                    w->data.img.view,
-                                    w->data.img.sampler,
-                                    w->data.img.layout);
+            desc_writer_write_image(&writers[set_index], set_handle, bind->binding, bind->descriptor_type,
+                                    w->data.img.view, w->data.img.sampler, w->data.img.layout);
             render_resources_mark_written(&obj->resources, bind->id);
         }
         else
@@ -2101,13 +2160,8 @@ void render_object_write_all(RenderObject* obj, const RenderWrite* writes, uint3
             if(!is_buffer_descriptor(bind->descriptor_type))
                 continue;
 
-            desc_writer_write_buffer(&writers[set_index],
-                                     set_handle,
-                                     bind->binding,
-                                     bind->descriptor_type,
-                                     w->data.buf.buffer,
-                                     w->data.buf.offset,
-                                     w->data.buf.range);
+            desc_writer_write_buffer(&writers[set_index], set_handle, bind->binding, bind->descriptor_type,
+                                     w->data.buf.buffer, w->data.buf.offset, w->data.buf.range);
             render_resources_mark_written(&obj->resources, bind->id);
         }
     }
@@ -2124,12 +2178,12 @@ void render_object_write_all_ids(RenderObject* obj, const RenderWriteId* writes,
     if(!obj || !writes || write_count == 0)
         return;
 
-    DescriptorWriter writers[SHADER_REFLECT_MAX_SETS] = {0};
-    bool has_writer[SHADER_REFLECT_MAX_SETS] = {0};
+    DescriptorWriter writers[SHADER_REFLECT_MAX_SETS]    = {0};
+    bool             has_writer[SHADER_REFLECT_MAX_SETS] = {0};
 
     for(uint32_t i = 0; i < write_count; i++)
     {
-        const RenderWriteId* w = &writes[i];
+        const RenderWriteId*     w    = &writes[i];
         const RenderBindingInfo* bind = render_find_binding_by_id(&obj->pipeline.refl, w->id);
 
         if(!bind)
@@ -2155,13 +2209,8 @@ void render_object_write_all_ids(RenderObject* obj, const RenderWriteId* writes,
             if(!is_image_descriptor(bind->descriptor_type))
                 continue;
 
-            desc_writer_write_image(&writers[set_index],
-                                    set_handle,
-                                    bind->binding,
-                                    bind->descriptor_type,
-                                    w->data.img.view,
-                                    w->data.img.sampler,
-                                    w->data.img.layout);
+            desc_writer_write_image(&writers[set_index], set_handle, bind->binding, bind->descriptor_type,
+                                    w->data.img.view, w->data.img.sampler, w->data.img.layout);
             render_resources_mark_written(&obj->resources, bind->id);
         }
         else
@@ -2169,13 +2218,8 @@ void render_object_write_all_ids(RenderObject* obj, const RenderWriteId* writes,
             if(!is_buffer_descriptor(bind->descriptor_type))
                 continue;
 
-            desc_writer_write_buffer(&writers[set_index],
-                                     set_handle,
-                                     bind->binding,
-                                     bind->descriptor_type,
-                                     w->data.buf.buffer,
-                                     w->data.buf.offset,
-                                     w->data.buf.range);
+            desc_writer_write_buffer(&writers[set_index], set_handle, bind->binding, bind->descriptor_type,
+                                     w->data.buf.buffer, w->data.buf.offset, w->data.buf.range);
             render_resources_mark_written(&obj->resources, bind->id);
         }
     }
@@ -2203,7 +2247,7 @@ void render_object_write_static_writes(RenderObject* obj, const RenderWrite* wri
     for(uint32_t i = 0; i < write_count; i++)
     {
         const RenderWrite* w = &writes[i];
-        RenderBinding b = render_object_get_binding(obj, w->name);
+        RenderBinding      b = render_object_get_binding(obj, w->name);
         if(w->type == RENDER_WRITE_BUFFER)
             render_write_list_buffer(&list, b, w->data.buf.buffer, w->data.buf.offset, w->data.buf.range);
         else
@@ -2223,7 +2267,7 @@ void render_object_write_frame_writes(RenderObject* obj, uint32_t frame_index, c
     for(uint32_t i = 0; i < write_count; i++)
     {
         const RenderWrite* w = &writes[i];
-        RenderBinding b = render_object_get_binding(obj, w->name);
+        RenderBinding      b = render_object_get_binding(obj, w->name);
         if(w->type == RENDER_WRITE_BUFFER)
             render_write_list_buffer(&list, b, w->data.buf.buffer, w->data.buf.offset, w->data.buf.range);
         else
@@ -2297,7 +2341,7 @@ bool render_object_validate_ready(const RenderObject* obj)
     if(!obj)
         return false;
 
-    bool ok = true;
+    bool                          ok   = true;
     const RenderObjectReflection* refl = &obj->pipeline.refl;
     for(uint32_t i = 0; i < refl->binding_count; i++)
     {
@@ -2310,8 +2354,8 @@ bool render_object_validate_ready(const RenderObject* obj)
 
         if(!render_resources_has_written((RenderResources*)&obj->resources, bind->id))
         {
-            log_warn("RenderObject missing binding: %s (set %u binding %u)",
-                     bind->name ? bind->name : "(null)", bind->set, bind->binding);
+            log_warn("RenderObject missing binding: %s (set %u binding %u)", bind->name ? bind->name : "(null)",
+                     bind->set, bind->binding);
             ok = false;
         }
     }
@@ -2323,10 +2367,7 @@ void render_reset_state(void)
     memset(&g_render_state, 0, sizeof(g_render_state));
 }
 
-void render_object_bind(VkCommandBuffer cmd,
-                        const RenderObject* obj,
-                        VkPipelineBindPoint bind_point,
-                        uint32_t frame_index)
+void render_object_bind(VkCommandBuffer cmd, const RenderObject* obj, VkPipelineBindPoint bind_point, uint32_t frame_index)
 {
     if(!obj)
         return;
@@ -2334,10 +2375,7 @@ void render_object_bind(VkCommandBuffer cmd,
     render_bind_sets(cmd, &obj->pipeline, &obj->resources, bind_point, frame_index);
 }
 
-void render_object_push_constants(VkCommandBuffer cmd,
-                                  const RenderObject* obj,
-                                  const void* data,
-                                  uint32_t size)
+void render_object_push_constants(VkCommandBuffer cmd, const RenderObject* obj, const void* data, uint32_t size)
 {
     if(!obj || !data || size == 0)
         return;
@@ -2359,13 +2397,13 @@ void render_object_push_constants(VkCommandBuffer cmd,
 // Instances
 // ------------------------------------------------------------
 
-RenderObjectInstance render_instance_create(RenderPipeline* pipe, RenderResources* res)
+void render_instance_create(RenderObjectInstance* inst, RenderPipeline* pipe, RenderResources* res)
 {
-    RenderObjectInstance inst = {0};
-    inst.pipe = pipe;
-    inst.res  = res;
-    inst.push_size = 0;
-    return inst;
+
+    *inst           = (RenderObjectInstance){0};
+    inst->pipe      = pipe;
+    inst->res       = res;
+    inst->push_size = 0;
 }
 
 void render_instance_set_push_data(RenderObjectInstance* inst, const void* data, uint32_t size)
@@ -2401,7 +2439,7 @@ void render_instance_push(VkCommandBuffer cmd, const RenderObjectInstance* inst)
         return;
 
     uint32_t max_size = inst->pipe->refl.push_constant_size;
-    uint32_t size = inst->push_size;
+    uint32_t size     = inst->push_size;
     if(max_size > 0 && size > max_size)
         size = max_size;
 

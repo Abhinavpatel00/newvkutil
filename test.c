@@ -23,6 +23,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <vulkan/vulkan_core.h>
 #include "depth.h"
 #include "camera.h"
 #include "scene.h"
@@ -282,8 +283,8 @@ int main()
         .instance_layer_count        = 0,
         .instance_extension_count    = glfw_ext_count,
         .device_extension_count      = 1,
-        .enable_gpu_based_validation = false,
-        .enable_validation           = false,
+        .enable_gpu_based_validation = true,
+        .enable_validation           = true,
 
         .validation_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT
                                | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
@@ -529,9 +530,9 @@ int main()
     tri_spec.use_bindless_if_available = VK_TRUE;
     tri_spec.bindless_descriptor_count = bindless.max_textures;
 
-    tri_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &tri_spec, 1);
+    render_object_create(&tri_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &tri_spec, 1);
     render_object_set_external_set(&tri_obj, "u_textures", bindless.set);
-    tri_inst = render_instance_create(&tri_obj.pipeline, &tri_obj.resources);
+    render_instance_create(&tri_inst, &tri_obj.pipeline, &tri_obj.resources);
 
     RenderObjectSpec toon_spec          = render_object_spec_from_config(&cfg);
     toon_spec.vert_spv                  = "compiledshaders/toon.vert.spv";
@@ -541,31 +542,30 @@ int main()
     toon_spec.use_bindless_if_available = VK_TRUE;
     toon_spec.bindless_descriptor_count = bindless.max_textures;
 
-    toon_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &toon_spec, 1);
+    render_object_create(&toon_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &toon_spec, 1);
     render_object_set_external_set(&toon_obj, "u_textures", bindless.set);
-    toon_inst = render_instance_create(&toon_obj.pipeline, &toon_obj.resources);
+    render_instance_create(&toon_inst, &toon_obj.pipeline, &toon_obj.resources);
 
     RenderObjectSpec toon_outline_spec = toon_spec;
     toon_outline_spec.frag_spv         = "compiledshaders/toon_outline.frag.spv";
     toon_outline_spec.depth_write      = VK_FALSE;
     toon_outline_spec.cull_mode        = VK_CULL_MODE_FRONT_BIT;
 
-    toon_outline_obj =
-        render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &toon_outline_spec, 1);
+
+    render_object_create(&toon_outline_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &toon_outline_spec, 1);
     render_object_set_external_set(&toon_outline_obj, "u_textures", bindless.set);
-    toon_outline_inst = render_instance_create(&toon_outline_obj.pipeline, &toon_outline_obj.resources);
+    render_instance_create(&toon_outline_inst, &toon_outline_obj.pipeline, &toon_outline_obj.resources);
 
     RenderObjectSpec cull_spec = render_object_spec_default();
     cull_spec.comp_spv         = "compiledshaders/cull.comp.spv";
-    cull_obj  = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &cull_spec, 1);
-    cull_inst = render_instance_create(&cull_obj.pipeline, &cull_obj.resources);
 
+
+    render_object_create(&cull_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &cull_spec, 1);
+    render_instance_create(&cull_inst, &cull_obj.pipeline, &cull_obj.resources);
     RenderObjectSpec terrain_paint_spec = render_object_spec_default();
     terrain_paint_spec.comp_spv         = "compiledshaders/terrain_paint.comp.spv";
-    terrain_paint_obj =
-        render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &terrain_paint_spec, 1);
-    terrain_paint_inst = render_instance_create(&terrain_paint_obj.pipeline, &terrain_paint_obj.resources);
-
+    render_object_create(&terrain_paint_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &terrain_paint_spec, 1);
+    render_instance_create(&terrain_paint_inst, &terrain_paint_obj.pipeline, &terrain_paint_obj.resources);
 
     RenderObjectSpec raymarch_spec       = render_object_spec_default();
     raymarch_spec.vert_spv               = "compiledshaders/fullscreen.vert.spv";
@@ -584,8 +584,49 @@ int main()
     raymarch_spec.depth_format           = VK_FORMAT_UNDEFINED;
     raymarch_spec.stencil_format         = VK_FORMAT_UNDEFINED;
 
-    raymarch_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &raymarch_spec, 1);
-    raymarch_inst                  = render_instance_create(&raymarch_obj.pipeline, &raymarch_obj.resources);
+    render_object_create(&raymarch_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &raymarch_spec, 1);
+    render_instance_create(&raymarch_inst, &raymarch_obj.pipeline, &raymarch_obj.resources);
+
+
+    RenderObjectSpec terrain_spec = render_object_spec_from_config(&cfg);
+
+    terrain_spec.vert_spv         = "compiledshaders/terrain.vert.spv";
+    terrain_spec.frag_spv         = "compiledshaders/terrain.frag.spv";
+    terrain_spec.blend_enable     = VK_FALSE;
+    terrain_spec.use_vertex_input = VK_TRUE;
+
+    render_object_create(&terrain_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &terrain_spec, 1);
+    render_object_enable_hot_reload(&terrain_obj, VK_NULL_HANDLE, &terrain_spec);
+    render_instance_create(&terrain_inst, &terrain_obj.pipeline, &terrain_obj.resources);
+
+
+    RenderObjectSpec grass_spec = terrain_spec;
+    grass_spec.vert_spv         = "compiledshaders/grass.vert.spv";
+    grass_spec.frag_spv         = "compiledshaders/grass.frag.spv";
+    grass_spec.use_vertex_input = VK_FALSE;
+    grass_spec.cull_mode        = VK_CULL_MODE_NONE;
+    grass_spec.blend_enable     = VK_FALSE;
+
+    render_object_create(&grass_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &grass_spec, 1);
+    render_object_enable_hot_reload(&grass_obj, VK_NULL_HANDLE, &grass_spec);
+    render_instance_create(&grass_inst, &grass_obj.pipeline, &grass_obj.resources);
+
+
+    RenderObjectSpec water_spec          = render_object_spec_from_config(&cfg);
+    water_spec.vert_spv                  = "compiledshaders/water.vert.spv";
+    water_spec.frag_spv                  = "compiledshaders/water.frag.spv";
+    water_spec.depth_write               = VK_FALSE;
+    water_spec.use_vertex_input          = VK_TRUE;
+    water_spec.allow_update_after_bind   = VK_TRUE;
+    water_spec.use_bindless_if_available = VK_TRUE;
+    water_spec.bindless_descriptor_count = bindless.max_textures;
+
+    render_object_create(&water_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &water_spec, 1);
+    render_object_enable_hot_reload(&water_obj, VK_NULL_HANDLE, &water_spec);
+    render_object_set_external_set(&water_obj, "u_textures", bindless.set);
+    render_instance_create(&water_ro_inst, &water_obj.pipeline, &water_obj.resources);
+
+   
     BufferArena host_arena         = {0};
     BufferArena device_arena       = {0};
     BufferSlice global_ubo_buf     = {0};
@@ -706,40 +747,6 @@ int main()
                                 &base_height_layout, HEIGHTMAP_RES, terrain_map_min_init[0], terrain_map_min_init[1],
                                 terrain_map_max_init[0], terrain_map_max_init[1], terrain_gui.freq,
                                 terrain_gui.noise_offset[0], terrain_gui.noise_offset[1], terrain_gui.height_scale);
-
-
-    RenderObjectSpec terrain_spec = render_object_spec_from_config(&cfg);
-
-    terrain_spec.vert_spv         = "compiledshaders/terrain.vert.spv";
-    terrain_spec.frag_spv         = "compiledshaders/terrain.frag.spv";
-    terrain_spec.blend_enable     = VK_FALSE;
-    terrain_spec.use_vertex_input = VK_TRUE;
-
-    terrain_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &terrain_spec, 1);
-    terrain_inst = render_instance_create(&terrain_obj.pipeline, &terrain_obj.resources);
-
-    RenderObjectSpec grass_spec = terrain_spec;
-    grass_spec.vert_spv         = "compiledshaders/grass.vert.spv";
-    grass_spec.frag_spv         = "compiledshaders/grass.frag.spv";
-    grass_spec.use_vertex_input = VK_FALSE;
-    grass_spec.cull_mode        = VK_CULL_MODE_NONE;
-    grass_spec.blend_enable     = VK_FALSE;
-
-    grass_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &grass_spec, 1);
-    grass_inst = render_instance_create(&grass_obj.pipeline, &grass_obj.resources);
-
-    RenderObjectSpec water_spec          = render_object_spec_from_config(&cfg);
-    water_spec.vert_spv                  = "compiledshaders/water.vert.spv";
-    water_spec.frag_spv                  = "compiledshaders/water.frag.spv";
-    water_spec.depth_write               = VK_FALSE;
-    water_spec.use_vertex_input          = VK_TRUE;
-    water_spec.allow_update_after_bind   = VK_TRUE;
-    water_spec.use_bindless_if_available = VK_TRUE;
-    water_spec.bindless_descriptor_count = bindless.max_textures;
-
-    water_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &water_spec, 1);
-    render_object_set_external_set(&water_obj, "u_textures", bindless.set);
-    water_ro_inst = render_instance_create(&water_obj.pipeline, &water_obj.resources);
 
     GpuProfiler prof[MAX_FRAME_IN_FLIGHT];
     float       cpu_frame_ms[MAX_FRAME_IN_FLIGHT] = {0};
@@ -1218,7 +1225,7 @@ int main()
         double cpu_frame_start = glfwGetTime();
         glfwPollEvents();
 
-        pipeline_hot_reload_update();
+        render_pipeline_hot_reload_update();
 
 
         double mx, my;
@@ -1548,8 +1555,12 @@ int main()
         // -------------------------------------------------------------
         // RENDER HERE using swap.images[image_index] via your FB/pipeline
         // -------------------------------------------------------------
+        render_reset_state();                 // IMPORTANT
+        render_pipeline_hot_reload_update();  // safe-ish now
         VkCommandBuffer cmd = cmd_buffers[current_frame];
         vk_cmd_begin(cmd, true);
+
+
         gpu_prof_begin_frame(cmd, P);
         /* transition for rendering target */
 

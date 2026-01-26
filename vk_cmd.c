@@ -1,5 +1,6 @@
 
 #include "vk_cmd.h"
+#include "render_object.h"
 #include <string.h>
 
 static VkCommandBufferLevel vk_cmd_level(bool primary)
@@ -63,6 +64,7 @@ void vk_cmd_alloc(VkDevice device, VkCommandPool pool, bool primary, VkCommandBu
 
 void vk_cmd_begin(VkCommandBuffer cmd, bool one_time)
 {
+
     VkCommandBufferBeginInfo bi = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = one_time ? VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT : 0u,
@@ -144,6 +146,7 @@ VkCommandBuffer begin_one_time_cmd(VkDevice device, VkCommandPool pool)
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
+    render_reset_state();
     VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
 
     return cmd;

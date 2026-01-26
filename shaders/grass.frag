@@ -41,17 +41,17 @@ void main()
         N = -N;
 
     vec3 sunDir  = normalize(vec3(-0.45, 0.95, 0.25));
-    vec3 sunCol  = vec3(1.05, 0.98, 0.88);
+    vec3 sunCol  = vec3(2.05, 0.98, 0.88);
     vec3 fillDir = normalize(vec3(0.6, 0.25, -0.35));
-    vec3 fillCol = vec3(0.55, 0.70, 0.95);
+    vec3 fillCol = vec3(1.55, 0.71, 0.95);
 
     float ndl = clamp(dot(N, sunDir), 0.0, 1.0);
     float ndlFill = clamp(dot(N, fillDir), 0.0, 1.0);
 
     float tip = pow(clamp(vBladeT, 0.0, 1.0), 1.25);
 
-    vec3 baseA = vec3(0.08, 0.26, 0.12);
-    vec3 baseB = vec3(0.14, 0.34, 0.16);
+    vec3 baseA = vec3(0.08, 3.26, 0.12);
+    vec3 baseB = vec3(0.14, 0.34, 2.16);
     vec3 tipA  = vec3(0.22, 0.58, 0.28);
     vec3 tipB  = vec3(0.32, 0.78, 0.34);
 
@@ -83,5 +83,5 @@ void main()
     float fog = exp(-dist * 0.0025);
     col = mix(ambientCol, col, fog);
 
-    outColor = vec4(col, 1.0);
+    outColor = vec4(col, 0.0);
 }
