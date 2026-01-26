@@ -356,6 +356,196 @@ static float terrain_height(float x, float z)
     return h * 8.0f;  // amplitude
 }
 
+// ------------------------------------------------------------------
+// CPU terrain bake: generates base heightmap once at startup
+// Uses the same noise patterns as the original procedural shader
+// ------------------------------------------------------------------
+static float dot3(const float* a, const float* b)
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static void mul_mat3_vec3(const float m[9], const float v[3], float out[3])
+{
+    out[0] = m[0] * v[0] + m[1] * v[1] + m[2] * v[2];
+    out[1] = m[3] * v[0] + m[4] * v[1] + m[5] * v[2];
+    out[2] = m[6] * v[0] + m[7] * v[1] + m[8] * v[2];
+}
+
+static float cpu_dot_noise(float px, float py, float pz)
+{
+    static const float PHI = 1.618033988f;
+    static const float GOLD[9] = {
+        -0.571464913f, +0.814921382f, +0.096597072f,
+        -0.278044873f, -0.303026659f, +0.911518454f,
+        +0.772087367f, +0.494042493f, +0.399753815f
+    };
+
+    float p[3] = {px, py, pz};
+    float gp[3];
+    mul_mat3_vec3(GOLD, p, gp);
+
+    float phip[3] = {PHI * px, PHI * py, PHI * pz};
+    float gphip[3];
+    mul_mat3_vec3(GOLD, phip, gphip);
+
+    float cos_gp[3] = {cosf(gp[0]), cosf(gp[1]), cosf(gp[2])};
+    float sin_gphip[3] = {sinf(gphip[0]), sinf(gphip[1]), sinf(gphip[2])};
+
+    return dot3(cos_gp, sin_gphip);  // ~[-3..+3]
+}
+
+static float cpu_dot_noise11(float px, float py, float pz)
+{
+    float n = cpu_dot_noise(px, py, pz) * (1.0f / 3.0f);
+    if (n < -1.0f) n = -1.0f;
+    if (n > 1.0f) n = 1.0f;
+    return n;
+}
+
+static float cpu_fbm_dot(float px, float py, float pz)
+{
+    float sum = 0.0f;
+    float amp = 0.5f;
+    float f = 1.0f;
+
+    for (int i = 0; i < 5; i++)
+    {
+        sum += amp * cpu_dot_noise11(px * f, py * f, pz * f);
+        f *= 2.0f;
+        amp *= 0.5f;
+    }
+    return sum;
+}
+
+static float cpu_ridged_fbm_dot(float px, float py, float pz)
+{
+    float sum = 0.0f;
+    float amp = 0.5f;
+    float f = 1.0f;
+
+    for (int i = 0; i < 5; i++)
+    {
+        float n = cpu_dot_noise11(px * f, py * f, pz * f);
+        n = 1.0f - fabsf(n);
+        n *= n;
+        sum += amp * n;
+        f *= 2.0f;
+        amp *= 0.5f;
+    }
+    return sum;  // [0..~1]
+}
+
+static void cpu_warp_dot(float px, float py, float pz, float strength, float* out_x, float* out_y, float* out_z)
+{
+    float wx = cpu_fbm_dot(px + 17.1f, py + 3.2f, pz + 11.7f);
+    float wy = cpu_fbm_dot(px + 5.4f, py + 19.3f, pz + 7.1f);
+    float wz = cpu_fbm_dot(px + 13.7f, py + 9.2f, pz + 21.4f);
+    *out_x = px + strength * wx;
+    *out_y = py + strength * wy;
+    *out_z = pz + strength * wz;
+}
+
+static float cpu_terrain_height_procedural(float xz_x, float xz_y, float freq, float noise_offset_x, float noise_offset_y, float height_scale)
+{
+    float px = (xz_x + noise_offset_x) * freq;
+    float py = (xz_y + noise_offset_y) * freq;
+    float pz = 0.0f;
+
+    // Apply domain warp
+    float wpx, wpy, wpz;
+    cpu_warp_dot(px, py, pz, 0.6f, &wpx, &wpy, &wpz);
+
+    float h = cpu_ridged_fbm_dot(wpx, wpy, wpz);
+    h = powf(h, 1.25f);
+
+    return h * height_scale;
+}
+
+static void terrain_bake_base_heightmap(ResourceAllocator* allocator,
+                                        VkDevice           device,
+                                        VkQueue            gfx_queue,
+                                        VkCommandPool      pool,
+                                        VkImage            base_height_image,
+                                        VkImageLayout*     inout_layout,
+                                        uint32_t           res,
+                                        float              map_min_x,
+                                        float              map_min_y,
+                                        float              map_max_x,
+                                        float              map_max_y,
+                                        float              freq,
+                                        float              noise_offset_x,
+                                        float              noise_offset_y,
+                                        float              height_scale)
+{
+    VkDeviceSize data_size = (VkDeviceSize)res * (VkDeviceSize)res * sizeof(uint16_t);
+
+    Buffer staging = {0};
+    res_create_buffer(allocator, data_size, VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                      VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, 0, &staging);
+
+    uint16_t* pixels = (uint16_t*)staging.mapping;
+
+    printf("[TERRAIN] Baking base heightmap %ux%u...\n", res, res);
+
+    for (uint32_t y = 0; y < res; y++)
+    {
+        for (uint32_t x = 0; x < res; x++)
+        {
+            // Map pixel to world XZ (same mapping as shaders)
+            float u = ((float)x + 0.5f) / (float)res;
+            float v = ((float)y + 0.5f) / (float)res;
+            float world_x = map_min_x + (map_max_x - map_min_x) * u;
+            float world_z = map_min_y + (map_max_y - map_min_y) * v;
+
+            float h = cpu_terrain_height_procedural(world_x, world_z, freq, noise_offset_x, noise_offset_y, height_scale);
+
+            // Convert to half float (R16_SFLOAT)
+            // Simple approximation for positive heights in reasonable range
+            // Using bit manipulation for proper half-float conversion
+            union { float f; uint32_t u; } conv;
+            conv.f = h;
+            uint32_t f32 = conv.u;
+            uint32_t sign = (f32 >> 16) & 0x8000;
+            int32_t exp = ((f32 >> 23) & 0xFF) - 127 + 15;
+            uint32_t mant = (f32 >> 13) & 0x3FF;
+
+            uint16_t h16;
+            if (exp <= 0) {
+                h16 = (uint16_t)sign;  // flush to zero
+            } else if (exp >= 31) {
+                h16 = (uint16_t)(sign | 0x7C00);  // infinity
+            } else {
+                h16 = (uint16_t)(sign | (exp << 10) | mant);
+            }
+
+            pixels[y * res + x] = h16;
+        }
+    }
+
+    printf("[TERRAIN] Base heightmap baked, uploading to GPU...\n");
+
+    VkCommandBuffer cmd = begin_one_time_cmd(device, pool);
+    IMAGE_BARRIER_IMMEDIATE(cmd, base_height_image, *inout_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    VkBufferImageCopy region = {
+        .bufferOffset      = 0,
+        .bufferRowLength   = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {res, res, 1},
+    };
+    vkCmdCopyBufferToImage(cmd, staging.buffer, base_height_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    IMAGE_BARRIER_IMMEDIATE(cmd, base_height_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    end_one_time_cmd(device, gfx_queue, pool, cmd);
+    *inout_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    res_destroy_buffer(allocator, &staging);
+    printf("[TERRAIN] Base heightmap upload complete.\n");
+}
+
 static bool screen_to_world_xz_camera(const Camera* cam, float mx, float my, float width, float height, float aspect, float terrain_y, vec2 out_xz)
 {
     if(width <= 0.0f || height <= 0.0f)
@@ -1024,11 +1214,19 @@ int main()
     water_material_buf = buffer_arena_alloc(&host_arena, sizeof(WaterMaterialGpu), 256);
     water_instance_buf = buffer_arena_alloc(&host_arena, sizeof(WaterInstanceGpu), 256);
 
-    VkImage       heightmap_image   = VK_NULL_HANDLE;
-    VkImageView   heightmap_view    = VK_NULL_HANDLE;
-    VmaAllocation heightmap_alloc   = NULL;
+    // Base heightmap (immutable after CPU bake) - procedural terrain
+    VkImage       base_height_image   = VK_NULL_HANDLE;
+    VkImageView   base_height_view    = VK_NULL_HANDLE;
+    VmaAllocation base_height_alloc   = NULL;
+    VkImageLayout base_height_layout  = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // Sculpt delta (mutable via compute) - starts at 0, stores user edits
+    VkImage       sculpt_delta_image   = VK_NULL_HANDLE;
+    VkImageView   sculpt_delta_view    = VK_NULL_HANDLE;
+    VmaAllocation sculpt_delta_alloc   = NULL;
+    VkImageLayout sculpt_delta_layout  = VK_IMAGE_LAYOUT_UNDEFINED;
+
     VkSampler     heightmap_sampler = VK_NULL_HANDLE;
-    VkImageLayout heightmap_layout  = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkTerrainGuiParams terrain_gui = {
         .height_scale   = 20.0f,
@@ -1039,15 +1237,26 @@ int main()
         .brush_hardness = 0.4f,
     };
 
-    VkImageCreateInfo       heightmap_info = VK_IMAGE_DEFAULT_2D(HEIGHTMAP_RES, HEIGHTMAP_RES, VK_FORMAT_R16_SFLOAT,
-                                                                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
-                                                                     | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    // Create base height texture (immutable after CPU bake - no STORAGE_BIT needed)
+    VkImageCreateInfo base_height_info = VK_IMAGE_DEFAULT_2D(HEIGHTMAP_RES, HEIGHTMAP_RES, VK_FORMAT_R16_SFLOAT,
+                                                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                                                                 | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VmaAllocationCreateInfo heightmap_alloc_info = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-    res_create_image(&allocator, &heightmap_info, heightmap_alloc_info.usage, heightmap_alloc_info.flags,
-                     &heightmap_image, &heightmap_alloc);
+    res_create_image(&allocator, &base_height_info, heightmap_alloc_info.usage, heightmap_alloc_info.flags,
+                     &base_height_image, &base_height_alloc);
 
-    VkImageViewCreateInfo heightmap_view_info = VK_IMAGE_VIEW_DEFAULT(heightmap_image, VK_FORMAT_R16_SFLOAT);
-    VK_CHECK(vkCreateImageView(device, &heightmap_view_info, NULL, &heightmap_view));
+    VkImageViewCreateInfo base_height_view_info = VK_IMAGE_VIEW_DEFAULT(base_height_image, VK_FORMAT_R16_SFLOAT);
+    VK_CHECK(vkCreateImageView(device, &base_height_view_info, NULL, &base_height_view));
+
+    // Create sculpt delta texture (mutable via compute - needs STORAGE_BIT)
+    VkImageCreateInfo sculpt_delta_info = VK_IMAGE_DEFAULT_2D(HEIGHTMAP_RES, HEIGHTMAP_RES, VK_FORMAT_R16_SFLOAT,
+                                                              VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT
+                                                                  | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    res_create_image(&allocator, &sculpt_delta_info, heightmap_alloc_info.usage, heightmap_alloc_info.flags,
+                     &sculpt_delta_image, &sculpt_delta_alloc);
+
+    VkImageViewCreateInfo sculpt_delta_view_info = VK_IMAGE_VIEW_DEFAULT(sculpt_delta_image, VK_FORMAT_R16_SFLOAT);
+    VK_CHECK(vkCreateImageView(device, &sculpt_delta_view_info, NULL, &sculpt_delta_view));
 
     VkSamplerCreateInfo sampler_info = {
         .sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -1068,26 +1277,44 @@ int main()
     };
     VK_CHECK(vkCreateSampler(device, &sampler_info, NULL, &heightmap_sampler));
 
+    // Calculate terrain bounds early (needed for CPU bake)
+    float terrain_half_init = ((float)TERRAIN_GRID - 1.0f) * TERRAIN_CELL * 0.5f;
+    vec2  terrain_map_min_init = {-terrain_half_init, -terrain_half_init};
+    vec2  terrain_map_max_init = {terrain_half_init, terrain_half_init};
+
+    // Clear sculpt delta to zero
+    terrain_clear_heightmap(device, qf.graphics_queue, upload_pool, sculpt_delta_image, &sculpt_delta_layout);
+    printf("[TERRAIN] Sculpt delta cleared to zero\\n");
+
+    // Load or bake base heightmap
     bool              heightmap_loaded = false;
     TerrainSaveHeader loaded_header    = {0};
     if(file_exists(TERRAIN_SAVE_PATH))
     {
         if(terrain_load_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool,
-                                  heightmap_image, &heightmap_layout, &loaded_header))
+                                  sculpt_delta_image, &sculpt_delta_layout, &loaded_header))
         {
             terrain_gui.height_scale    = loaded_header.heightScale;
             terrain_gui.freq            = loaded_header.freq;
             terrain_gui.noise_offset[0] = loaded_header.noiseOffset[0];
             terrain_gui.noise_offset[1] = loaded_header.noiseOffset[1];
             heightmap_loaded            = true;
-            printf("[TERRAIN] Loaded heightmap from %s\n", TERRAIN_SAVE_PATH);
+            printf("[TERRAIN] Loaded sculpt delta from %s\\n", TERRAIN_SAVE_PATH);
         }
     }
     if(!heightmap_loaded)
     {
-        terrain_clear_heightmap(device, qf.graphics_queue, upload_pool, heightmap_image, &heightmap_layout);
-        printf("[TERRAIN] New procedural base (empty heightmap)\n");
+        printf("[TERRAIN] No saved sculpt data found\\n");
     }
+
+    // Always bake base terrain from procedural noise on CPU (once at startup)
+    terrain_bake_base_heightmap(&allocator, device, qf.graphics_queue, upload_pool,
+                                base_height_image, &base_height_layout,
+                                HEIGHTMAP_RES,
+                                terrain_map_min_init[0], terrain_map_min_init[1],
+                                terrain_map_max_init[0], terrain_map_max_init[1],
+                                terrain_gui.freq, terrain_gui.noise_offset[0], terrain_gui.noise_offset[1],
+                                terrain_gui.height_scale);
 
 
     RenderObjectSpec terrain_spec = render_object_spec_from_config(&cfg);
@@ -1445,13 +1672,15 @@ int main()
 
     RenderWrite terrain_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
-        RW_IMG("uHeightMap", heightmap_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uBaseHeight", base_height_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uSculptDelta", sculpt_delta_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
     render_object_write_static(&terrain_obj, terrain_writes, (uint32_t)(sizeof(terrain_writes) / sizeof(terrain_writes[0])));
 
     RenderWrite grass_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
-        RW_IMG("uHeightMap", heightmap_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uBaseHeight", base_height_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uSculptDelta", sculpt_delta_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
     render_object_write_static(&grass_obj, grass_writes, (uint32_t)(sizeof(grass_writes) / sizeof(grass_writes[0])));
 
@@ -1459,7 +1688,8 @@ int main()
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
         RW_BUF_O("mat_buf", water_material_buf.buffer, water_material_buf.offset, sizeof(WaterMaterialGpu)),
         RW_BUF_O("inst_buf", water_instance_buf.buffer, water_instance_buf.offset, sizeof(WaterInstanceGpu)),
-        RW_IMG("uHeightMap", heightmap_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uBaseHeight", base_height_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uSculptDelta", sculpt_delta_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
     render_object_write_static(&water_obj, water_writes, (uint32_t)(sizeof(water_writes) / sizeof(water_writes[0])));
 
@@ -1475,7 +1705,7 @@ int main()
     render_object_write_static(&cull_obj, cull_writes, (uint32_t)(sizeof(cull_writes) / sizeof(cull_writes[0])));
 
     RenderWrite terrain_paint_writes[] = {
-        RW_IMG("heightMap", heightmap_view, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL),
+        RW_IMG("sculptDelta", sculpt_delta_view, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL),
     };
     render_object_write_static(&terrain_paint_obj, terrain_paint_writes,
                                (uint32_t)(sizeof(terrain_paint_writes) / sizeof(terrain_paint_writes[0])));
@@ -1835,13 +2065,22 @@ int main()
         {
             TerrainSaveHeader hdr = {0};
             if(terrain_load_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool,
-                                      heightmap_image, &heightmap_layout, &hdr))
+                                      sculpt_delta_image, &sculpt_delta_layout, &hdr))
             {
                 terrain_gui.height_scale    = hdr.heightScale;
                 terrain_gui.freq            = hdr.freq;
                 terrain_gui.noise_offset[0] = hdr.noiseOffset[0];
                 terrain_gui.noise_offset[1] = hdr.noiseOffset[1];
-                printf("[TERRAIN] Loaded heightmap from %s\n", TERRAIN_SAVE_PATH);
+                printf("[TERRAIN] Loaded sculpt delta from %s\n", TERRAIN_SAVE_PATH);
+
+                // Re-bake base terrain with new parameters
+                terrain_bake_base_heightmap(&allocator, device, qf.graphics_queue, upload_pool,
+                                            base_height_image, &base_height_layout,
+                                            HEIGHTMAP_RES,
+                                            terrain_map_min[0], terrain_map_min[1],
+                                            terrain_map_max[0], terrain_map_max[1],
+                                            terrain_gui.freq, terrain_gui.noise_offset[0], terrain_gui.noise_offset[1],
+                                            terrain_gui.height_scale);
             }
             else
             {
@@ -1854,7 +2093,18 @@ int main()
         {
             terrain_gui.noise_offset[0] = ((float)rand() / (float)RAND_MAX) * 1000.0f;
             terrain_gui.noise_offset[1] = ((float)rand() / (float)RAND_MAX) * 1000.0f;
-            terrain_clear_heightmap(device, qf.graphics_queue, upload_pool, heightmap_image, &heightmap_layout);
+
+            // Clear sculpt delta
+            terrain_clear_heightmap(device, qf.graphics_queue, upload_pool, sculpt_delta_image, &sculpt_delta_layout);
+
+            // Re-bake base terrain with new seed
+            terrain_bake_base_heightmap(&allocator, device, qf.graphics_queue, upload_pool,
+                                        base_height_image, &base_height_layout,
+                                        HEIGHTMAP_RES,
+                                        terrain_map_min[0], terrain_map_min[1],
+                                        terrain_map_max[0], terrain_map_max[1],
+                                        terrain_gui.freq, terrain_gui.noise_offset[0], terrain_gui.noise_offset[1],
+                                        terrain_gui.height_scale);
             printf("[TERRAIN] Procedural terrain regenerated (seed %.2f, %.2f)\n", terrain_gui.noise_offset[0],
                    terrain_gui.noise_offset[1]);
             request_regen = false;
@@ -1875,9 +2125,9 @@ int main()
             };
 
             if(terrain_save_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool,
-                                      heightmap_image, &heightmap_layout, &hdr))
+                                      sculpt_delta_image, &sculpt_delta_layout, &hdr))
             {
-                printf("[TERRAIN] Saved heightmap to %s\n", TERRAIN_SAVE_PATH);
+                printf("[TERRAIN] Saved sculpt delta to %s\n", TERRAIN_SAVE_PATH);
             }
             else
             {
@@ -1938,10 +2188,10 @@ int main()
 
         if(paint_active)
         {
-            if(heightmap_layout != VK_IMAGE_LAYOUT_GENERAL)
+            if(sculpt_delta_layout != VK_IMAGE_LAYOUT_GENERAL)
             {
-                IMAGE_BARRIER_IMMEDIATE(cmd, heightmap_image, heightmap_layout, VK_IMAGE_LAYOUT_GENERAL);
-                heightmap_layout = VK_IMAGE_LAYOUT_GENERAL;
+                IMAGE_BARRIER_IMMEDIATE(cmd, sculpt_delta_image, sculpt_delta_layout, VK_IMAGE_LAYOUT_GENERAL);
+                sculpt_delta_layout = VK_IMAGE_LAYOUT_GENERAL;
             }
 
             render_instance_bind(cmd, &terrain_paint_inst, VK_PIPELINE_BIND_POINT_COMPUTE, current_frame);
@@ -1963,13 +2213,13 @@ int main()
             uint32_t group_y = (HEIGHTMAP_RES + 7u) / 8u;
             vkCmdDispatch(cmd, group_x, group_y, 1);
 
-            IMAGE_BARRIER_IMMEDIATE(cmd, heightmap_image, heightmap_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            heightmap_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            IMAGE_BARRIER_IMMEDIATE(cmd, sculpt_delta_image, sculpt_delta_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            sculpt_delta_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
-        else if(heightmap_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        else if(sculpt_delta_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
         {
-            IMAGE_BARRIER_IMMEDIATE(cmd, heightmap_image, heightmap_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            heightmap_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            IMAGE_BARRIER_IMMEDIATE(cmd, sculpt_delta_image, sculpt_delta_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            sculpt_delta_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
         VkRenderingAttachmentInfo color_attach = {.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -2315,8 +2565,9 @@ int main()
         .heightScale = terrain_gui.height_scale,
         .freq        = terrain_gui.freq,
     };
-    terrain_save_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool, heightmap_image,
-                           &heightmap_layout, &autosave_hdr);
+    // Save sculpt delta (not base terrain - that gets re-baked from params)
+    terrain_save_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool, sculpt_delta_image,
+                           &sculpt_delta_layout, &autosave_hdr);
 
 
     vk_gui_imgui_shutdown();
@@ -2342,10 +2593,14 @@ int main()
 
     if(heightmap_sampler)
         vkDestroySampler(device, heightmap_sampler, NULL);
-    if(heightmap_view)
-        vkDestroyImageView(device, heightmap_view, NULL);
-    if(heightmap_image)
-        res_destroy_image(&allocator, heightmap_image, heightmap_alloc);
+    if(base_height_view)
+        vkDestroyImageView(device, base_height_view, NULL);
+    if(base_height_image)
+        res_destroy_image(&allocator, base_height_image, base_height_alloc);
+    if(sculpt_delta_view)
+        vkDestroyImageView(device, sculpt_delta_view, NULL);
+    if(sculpt_delta_image)
+        res_destroy_image(&allocator, sculpt_delta_image, sculpt_delta_alloc);
 
     destroy_depth_target(&allocator, &depth);
 

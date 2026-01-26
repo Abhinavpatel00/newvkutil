@@ -1,7 +1,8 @@
 #version 450
 layout(local_size_x=8, local_size_y=8) in;
 
-layout(set=0,binding=0, r16f) uniform image2D heightMap;
+// Sculpt delta texture - stores user edits on top of base terrain
+layout(set=0,binding=0, r16f) uniform image2D sculptDelta;
 
 layout(push_constant) uniform Brush {
     vec2 centerXZ;   // world XZ
@@ -23,7 +24,7 @@ float falloff(float d, float r, float hardness)
 void main()
 {
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(heightMap);
+    ivec2 size = imageSize(sculptDelta);
     if(pix.x >= size.x || pix.y >= size.y) return;
 
     // map pixel -> world xz
@@ -35,8 +36,9 @@ void main()
 
     float f = falloff(d, brush.radius, brush.hardness);
 
-    float oldH = imageLoad(heightMap, pix).r;
-    float newH = oldH + brush.strength * f;
+    // Read current delta, add brush contribution, write back
+    float oldDelta = imageLoad(sculptDelta, pix).r;
+    float newDelta = oldDelta + brush.strength * f;
 
-    imageStore(heightMap, pix, vec4(newH,0,0,0));
+    imageStore(sculptDelta, pix, vec4(newDelta,0,0,0));
 }

@@ -19,7 +19,11 @@ layout(set=0, binding=0) uniform GlobalUBO {
     vec4 cameraPos;
 } ubo;
 
-layout(set=1, binding=0) uniform sampler2D uHeightMap;
+// Two heightmaps for hybrid terrain:
+// baseHeight: baked once on CPU (procedural terrain)
+// sculptDelta: user edits via compute (starts at 0)
+layout(set=1, binding=0) uniform sampler2D uBaseHeight;
+layout(set=1, binding=1) uniform sampler2D uSculptDelta;
 
 layout(push_constant) uniform TerrainPC {
     float time;
@@ -36,116 +40,57 @@ layout(push_constant) uniform TerrainPC {
 } pc;
 
 // ------------------------------------------------------------
-// Your dot-noise
+// Sample final height = baseHeight + sculptDelta
+// No procedural noise at runtime - all baked on CPU!
 // ------------------------------------------------------------
-const float PHI = 1.618033988;
-const mat3 GOLD = mat3(
-    -0.571464913, +0.814921382, +0.096597072,
-    -0.278044873, -0.303026659, +0.911518454,
-    +0.772087367, +0.494042493, +0.399753815
-);
-
-float dot_noise(vec3 p)
+float sampleHeight(vec2 xz)
 {
-    return dot(cos(GOLD * p), sin(PHI * p * GOLD)); // ~[-3..+3]
-}
-
-float dot_noise11(vec3 p)
-{
-    return clamp(dot_noise(p) * (1.0/3.0), -1.0, 1.0);
-}
-
-float fbm_dot(vec3 p)
-{
-    float sum = 0.0;
-    float amp = 0.5;
-    float f   = 1.0;
-
-    for(int i = 0; i < 5; i++)
-    {
-        sum += amp * dot_noise11(p * f);
-        f *= 2.0;
-        amp *= 0.5;
-    }
-    return sum;
-}
-
-float ridged_fbm_dot(vec3 p)
-{
-    float sum = 0.0;
-    float amp = 0.5;
-    float f   = 1.0;
-
-    for(int i = 0; i < 5; i++)
-    {
-        float n = dot_noise11(p * f);
-        n = 1.0 - abs(n);
-        n *= n;
-        sum += amp * n;
-
-        f *= 2.0;
-        amp *= 0.5;
-    }
-    return sum; // [0..~1]
-}
-
-vec3 warp_dot(vec3 p, float strength)
-{
-    float wx = fbm_dot(p + vec3(17.1,  3.2, 11.7));
-    float wy = fbm_dot(p + vec3( 5.4, 19.3,  7.1));
-    float wz = fbm_dot(p + vec3(13.7,  9.2, 21.4));
-    return p + strength * vec3(wx, wy, wz);
-}
-
-float terrain_height(vec2 xz)
-{
-    vec3 p = vec3(xz + pc.noiseOffset, 0.0) * pc.freq;
-
-    // mild warp so it doesn't look like a cheap carpet
-    p = warp_dot(p, 0.6);
-
-    float h = ridged_fbm_dot(p);     // [0..1]
-    h = pow(h, 1.25);                // shape
-
     vec2 denom = max(pc.mapMax - pc.mapMin, vec2(1e-5));
-    vec2 uv = (xz - pc.mapMin) / denom;
-    uv = clamp(uv, vec2(0.0), vec2(1.0));
-    float hm = texture(uHeightMap, uv).r;
+    vec2 uv = clamp((xz - pc.mapMin) / denom, vec2(0.0), vec2(1.0));
 
-    return h * pc.heightScale + hm;
+    float base = texture(uBaseHeight, uv).r;
+    float delta = texture(uSculptDelta, uv).r;
+    return base + delta;
 }
 
-vec3 terrain_normal(vec2 xz)
+// ------------------------------------------------------------
+// Compute normal from final height using 4 texture taps
+// Much cheaper than 4x procedural FBM!
+// ------------------------------------------------------------
+vec3 terrainNormal(vec2 xz)
 {
-    // normal sampling step in world units
+    vec2 denom = max(pc.mapMax - pc.mapMin, vec2(1e-5));
+    vec2 uv = clamp((xz - pc.mapMin) / denom, vec2(0.0), vec2(1.0));
+    vec2 texel = 1.0 / vec2(textureSize(uBaseHeight, 0));
 
+    // Sample heights at neighboring texels
+    float hL = texture(uBaseHeight, uv - vec2(texel.x, 0)).r + texture(uSculptDelta, uv - vec2(texel.x, 0)).r;
+    float hR = texture(uBaseHeight, uv + vec2(texel.x, 0)).r + texture(uSculptDelta, uv + vec2(texel.x, 0)).r;
+    float hD = texture(uBaseHeight, uv - vec2(0, texel.y)).r + texture(uSculptDelta, uv - vec2(0, texel.y)).r;
+    float hU = texture(uBaseHeight, uv + vec2(0, texel.y)).r + texture(uSculptDelta, uv + vec2(0, texel.y)).r;
 
+    // World-space step size for normal computation
+    float worldStep = (pc.mapMax.x - pc.mapMin.x) * texel.x;
 
-float eps = 0.25 * pc.worldScale; // instead of 1.0
-    float hL = terrain_height(xz + vec2(-eps, 0.0));
-    float hR = terrain_height(xz + vec2( eps, 0.0));
-    float hD = terrain_height(xz + vec2(0.0, -eps));
-    float hU = terrain_height(xz + vec2(0.0,  eps));
-
-    vec3 dx = vec3(2.0 * eps, hR - hL, 0.0);
-    vec3 dz = vec3(0.0, hU - hD, 2.0 * eps);
-
-    return normalize(cross(dz, dx));
+    vec3 N = normalize(vec3(
+        -(hR - hL) / (2.0 * worldStep),
+        1.0,
+        -(hU - hD) / (2.0 * worldStep)
+    ));
+    return N;
 }
 
 void main()
 {
+    vec2 worldXZ = inPos.xz * pc.worldScale;
 
- 
-vec2 worldXZ = inPos.xz * pc.worldScale;
-//Sometimes shader compilers optimize away unused push constant members, and reflection tools can miss them if you build layouts from reflection.
-// Keep push-constant size consistent across stages (prevents driver trimming)
-float _pc_keep = pc.brushRadius + pc.brushActive + pc.brushDelta + pc.brushXZ.x * 0.0;
+    // Keep push-constant size consistent across stages (prevents driver trimming)
+    float _pc_keep = pc.brushRadius + pc.brushActive + pc.brushDelta + pc.brushXZ.x * 0.0;
 
-float h = terrain_height(worldXZ);
+    float h = sampleHeight(worldXZ);
 
     vec3 worldPos = vec3(worldXZ.x, h, worldXZ.y);
-    vec3 N = terrain_normal(worldXZ);
+    vec3 N = terrainNormal(worldXZ);
 
     vWorldPos = worldPos;
     vWorldNrm = N;

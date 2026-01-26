@@ -18,7 +18,9 @@ layout(set = 0, binding = 0) uniform GlobalUBO
     vec4 cameraPos;
 } ubo;
 
-layout(set = 0, binding = 3) uniform sampler2D uHeightMap;
+// Two heightmaps for hybrid terrain
+layout(set = 0, binding = 3) uniform sampler2D uBaseHeight;
+layout(set = 0, binding = 4) uniform sampler2D uSculptDelta;
 
 layout(set = 1, binding = 0) uniform sampler2D u_textures[];
 
@@ -60,79 +62,18 @@ layout(push_constant) uniform WaterPC
     vec4  sunDirIntensity;
 } pc;
 
-const float PHI = 1.618033988;
-const mat3 GOLD = mat3(
-    -0.571464913, +0.814921382, +0.096597072,
-    -0.278044873, -0.303026659, +0.911518454,
-    +0.772087367, +0.494042493, +0.399753815
-);
-
-float dot_noise(vec3 p)
+// ------------------------------------------------------------
+// Sample final height = baseHeight + sculptDelta
+// No procedural noise at runtime! Fast water depth calculation.
+// ------------------------------------------------------------
+float sampleHeight(vec2 xz)
 {
-    return dot(cos(GOLD * p), sin(PHI * p * GOLD));
-}
-
-float dot_noise11(vec3 p)
-{
-    return clamp(dot_noise(p) * (1.0/3.0), -1.0, 1.0);
-}
-
-float fbm_dot(vec3 p)
-{
-    float sum = 0.0;
-    float amp = 0.5;
-    float f   = 1.0;
-
-    for(int i = 0; i < 5; i++)
-    {
-        sum += amp * dot_noise11(p * f);
-        f *= 2.0;
-        amp *= 0.5;
-    }
-    return sum;
-}
-
-float ridged_fbm_dot(vec3 p)
-{
-    float sum = 0.0;
-    float amp = 0.5;
-    float f   = 1.0;
-
-    for(int i = 0; i < 5; i++)
-    {
-        float n = dot_noise11(p * f);
-        n = 1.0 - abs(n);
-        n *= n;
-        sum += amp * n;
-
-        f *= 2.0;
-        amp *= 0.5;
-    }
-    return sum;
-}
-
-vec3 warp_dot(vec3 p, float strength)
-{
-    float wx = fbm_dot(p + vec3(17.1,  3.2, 11.7));
-    float wy = fbm_dot(p + vec3( 5.4, 19.3,  7.1));
-    float wz = fbm_dot(p + vec3(13.7,  9.2, 21.4));
-    return p + strength * vec3(wx, wy, wz);
-}
-
-float terrain_height(vec2 xz)
-{
-    vec3 p = vec3(xz + pc.noiseOffset, 0.0) * pc.freq;
-    p = warp_dot(p, 0.6);
-
-    float h = ridged_fbm_dot(p);
-    h = pow(h, 1.25);
-
     vec2 denom = max(pc.mapMax - pc.mapMin, vec2(1e-5));
-    vec2 uv = (xz - pc.mapMin) / denom;
-    uv = clamp(uv, vec2(0.0), vec2(1.0));
-    float hm = texture(uHeightMap, uv).r;
+    vec2 uv = clamp((xz - pc.mapMin) / denom, vec2(0.0), vec2(1.0));
 
-    return h * pc.heightScale + hm;
+    float base = texture(uBaseHeight, uv).r;
+    float delta = texture(uSculptDelta, uv).r;
+    return base + delta;
 }
 
 void main()
@@ -142,7 +83,9 @@ void main()
     vec2 baseUV = vUV * mat.params0.x;
     vec2 foamUV = vUV * mat.params0.y;
 
-    float terrainH = terrain_height(vWorldPos.xz);
+    // Fast terrain height sampling - no procedural noise!
+    float terrainH = sampleHeight(vWorldPos.xz);
+  
     float depth = max(pc.waterHeight - terrainH, 0.0);
     float depthT = clamp(depth / max(pc.depthFade, 1e-4), 0.0, 1.0);
 
