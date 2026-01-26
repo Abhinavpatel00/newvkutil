@@ -1,0 +1,91 @@
+
+:'Frequency-based descriptor sets
+While slot-based resource binding model is simple and familiar, it doesn’t result in optimal performance. Some mobile hardware may not support multiple descriptor sets; however, in general Vulkan API and driver expect an application to manage descriptor sets based on frequency of change.
+
+A more Vulkan centric renderer would organize data that the shaders need to access into groups by frequency of change, and use individual sets for individual frequencies, with set=0 representing least frequent change, and set=3 representing most frequent. For example, a typical setup would involve:
+
+Set=0 descriptor set containing uniform buffer with global, per-frame or per-view data, as well as globally available textures such as shadow map texture array/atlas
+Set=1 descriptor set containing uniform buffer and texture descriptors for per-material data, such as albedo map, Fresnel coefficients, etc.
+Set=2 descriptor set containing dynamic uniform buffer with per-draw data, such as world transform array
+For set=0, the expectation is that it only changes a handful of times per frame; it’s sufficient to use a dynamic allocation scheme similar to the previous section.
+
+For set=1, the expectation is that for most objects, the material data persists between frames, and as such could be allocated and updated only when the gameplay code changes material data.
+
+For set=2, the data would be completely dynamic; due to the use of a dynamic uniform buffer, we’d rarely need to allocate and update this descriptor set – assuming dynamic constants are uploaded to a series of large per-frame buffers, for most draws we’d need to update the buffer with the constant data, and call vkCmdBindDescriptorSets with new offsets.
+
+Note that due to compatibility rules between pipeline objects, in most cases it’s enough to bind sets 1 and 2 whenever a material changes, and only set 2 when material is the same as that for the previous draw call. This results in just one call to vkCmdBindDescriptorSets per draw call.
+
+For a complex renderer, different shaders might need to use different layouts – for example, not all shaders need to agree on the same layout for material data. In rare cases it might also make sense to use more than 3 sets depending on the frame structure. Additionally, given the flexibility of Vulkan it’s not strictly required to use the same resource binding system for all draw calls in the scene. For example, post-processing draw call chains tend to be highly dynamic, with texture/constant data changing completely between individual draw calls. Some renderers initially implement the dynamic slot-based binding model from the previous section and proceed to additionally implement the frequency-based sets for world rendering to minimize the performance penalty for set management, while still keeping the simplicity of slot-based model for more dynamic parts of the rendering pipeline.
+
+The scheme described above assumes that in most cases, per-draw data is larger than the size that can be efficiently set via push constants. Push constants can be set without updating or rebinding descriptor sets; with a guaranteed limit of 128 bytes per draw call, it’s tempting to use them for per-draw data such as a 4x3 transform matrix for an object. However, on some architectures the actual number of constants available to push quickly depends on the descriptor setup the shaders use, and is closer to 12 bytes or so. Exceeding this limit can force the driver to spill the push constants into driver-managed ring buffer, which can end up being more expensive than moving this data to a dynamic uniform buffer on the application side. While limited use of push constants may still be a good idea for some designs, it’s more appropriate to use them in a fully bindless scheme described in the next section.
+
+
+
+
+Frequency-based descriptor sets reduce the descriptor set binding overhead; however, you still need to bind one or two descriptor sets per draw call. Maintaining material descriptor sets requires a management layer that needs to update GPU-visible descriptor sets whenever material parameters change; additionally, since texture descriptors are cached in material data, this makes global texture streaming systems hard to deal with – whenever some mipmap levels in a texture get streamed in or out, all materials that refer to this texture need to be updated. This requires complex interaction between material system and texture streaming system and introduces extra overhead whenever a texture is adjusted – which partially offsets the benefits of the frequency-based scheme. Finally, due to the need to set up descriptor sets per draw call it’s hard to adapt any of the aforementioned schemes to GPU-based culling or command submission.
+
+It is possible to design a bindless scheme where the number of required set binding calls is constant for the world rendering, which decouples texture descriptors from materials, making texture streaming systems easier to implement, and facilitates GPU-based submission. As with the previous scheme, this can be combined with dynamic ad-hoc descriptor updates for parts of the scene where the number of draw calls is small, and flexibility is important, such as post-processing
+
+Similarly to the frequency-based design, we’ll split the shader data into global uniforms and textures (set 0), material data and per-draw data. Global uniforms and textures can be specified via a descriptor set the same way as described the previous section.
+
+For per-material data, we will move the texture descriptors into a large texture descriptor array (note: this is a different concept than a texture array – texture array uses one descriptor and forces all textures to have the same size and format; descriptor array doesn’t have this limitation and can contain arbitrary texture descriptors as array elements, including texture array descriptors). Each material in the material data will have an index into this array instead of texture descriptor; the index will be part of the material data, which will also have other material constants.
+
+All material constants for all materials in the scene will reside in one large storage buffer; while it’s possible to support multiple material types with this scheme, for simplicity we’ll assume that all materials can be specified using the same data. An example of material data structure is below:
+
+struct MaterialData
+{
+	vec4 albedoTint;
+
+	float tilingX;
+	float tilingY;
+	float reflectance;
+	float unused0; // pad to vec4
+
+	uint albedoTexture;
+	uint normalTexture;
+	uint roughnessTexture;
+	uint unused1; // pad to vec4
+};
+Similarly, all per-draw constants for all objects in the scene can reside in another large storage buffer; for simplicity, we’ll assume that all per-draw constants have identical structure. To support skinned objects in a scheme like this, we’ll extract transform data into a separate, third storage buffer:
+
+struct TransformData
+{
+	vec4 transform[3];
+};
+Something that we’ve ignored so far is the vertex data specification. While Vulkan provides a first-class way to specify vertex data by calling vkCmdBindVertexBuffers, having to bind vertex buffers per-draw would not work for a fully bindless design. Additionally, some hardware doesn’t support vertex buffers as a first-class entity, and the driver has to emulate vertex buffer binding, which causes some CPU-side slowdowns when using vkCmdBindVertexBuffers. In a fully bindless design, we need to assume that all vertex buffers are suballocated in one large buffer and either use per-draw vertex offsets (vertexOffset argument to vkCmdDrawIndexed) to have hardware fetch data from it, or pass an offset in this buffer to the shader with each draw call and fetch data from the buffer in the shader. Both approaches can work well, and might be more or less efficient depending on the GPU; here we will assume that the vertex shader will perform manual vertex fetching.
+
+Thus, for each draw call we need to specify three integers to the shader:
+
+Material index; used to look up material data from material storage buffer. The textures can then be accessed using the indices from the material data and the descriptor array.
+Transform data index; used to look up transform data from transform storage buffer
+Vertex data offset; used to look up vertex attributes from vertex storage buffer
+We can specify these indices and additional data, if necessary, via draw data:
+
+struct DrawData
+{
+	uint materialIndex;
+	uint transformOffset;
+	uint vertexOffset;
+	uint unused0; // vec4 padding
+
+	// ... extra gameplay data goes here
+};
+The shader will need to access storage buffers containing MaterialData, TransformData, DrawData as well as a storage buffer containing vertex data. These can be bound the shader via the global descriptor set; the only remaining piece of information is the draw data index, that can be passed via a push constant.
+
+With this scheme, we’d need to update the storage buffers used by materials and draw calls each frame and bind them once using our global descriptor set; additionally, we need to bind index data – assuming that, like vertex data, index data is allocated in one large index buffer, we only need to bind it once using vkCmdBindIndexBuffer. With the global setup complete, for each draw call we need to call vkCmdBindPipeline if the shader changes, followed by vkCmdPushConstants to specify an index into the draw data buffer4, followed by vkCmdDrawIndexed.
+
+In a GPU-centric design, we can use vkCmdDrawIndirect or vkCmdDrawIndirectCountKHR (provided by KHR_draw_indirect_count extension, promoted to core Vulkan 1.2) and fetch per-draw constants using gl_DrawIDARB (provided by KHR_shader_draw_parameters extension) as an index instead of push constants. The only caveat is that for GPU-based submission, we’d need to bucket draw calls based on pipeline object on CPU since there’s no support for switching pipeline objects otherwise.
+
+With this, vertex shader code to transform the vertex could look like this:
+
+DrawData dd = drawData[gl_DrawIDARB];
+TransformData td = transformData[dd.transformOffset];
+vec4 positionLocal = vec4(positionData[gl_VertexIndex + dd.vertexOffset], 1.0);
+vec3 positionWorld = mat4x3(td.transform[0], td.transform[1], td.transform[2]) * positionLocal;
+Fragment shader code to sample material textures could look like this:
+
+DrawData dd = drawData[drawId];
+MaterialData md = materialData[dd.materialIndex];
+vec4 albedo = texture(sampler2D(materialTextures[md.albedoTexture], albedoSampler), uv * vec2(md.tilingX, md.tilingY));
+This scheme minimizes the CPU-side overhead. Of course, fundamentally it’s a balance between multiple factors:
+

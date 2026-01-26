@@ -1,0 +1,142 @@
+#version 450
+#extension GL_GOOGLE_include_directive: require
+#extension GL_ARB_separate_shader_objects : enable
+#extension GL_ARB_shading_language_420pack : enable
+#extension GL_ARB_shader_storage_buffer_object : enable
+#extension GL_ARB_uniform_buffer_object : enable
+
+#include "coord.glsl"
+
+layout(local_size_x = 64) in;
+
+#define SCENE_MAX_LODS 8
+
+struct MeshDraw
+{
+    vec4  position_scale;
+    vec4  orientation;
+    uvec4 meta;
+};
+
+struct MeshLod
+{
+    uint indexOffset;
+    uint indexCount;
+    float error;
+    float pad;
+};
+
+struct MeshGpu
+{
+    vec4  center_radius;
+    uvec4 meta; // x=vertexOffset, y=vertexCount, z=lodCount
+    MeshLod lods[SCENE_MAX_LODS];
+};
+
+struct DrawIndexedCmd
+{
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+layout(std140, binding = 0) uniform CullData
+{
+    mat4 view;
+    vec4 frustum; // x=1, y=tanHalfX, z=1, w=tanHalfY
+    vec4 params;  // x=znear, y=zfar, z=lodTargetPx, w=viewportHeight
+    uvec4 counts; // x=drawCount, y=lodEnabled
+} cullData;
+
+layout(std430, binding = 1) buffer Draws
+{
+    MeshDraw draws[];
+} drawsBuf;
+
+layout(std430, binding = 2) buffer Meshes
+{
+    MeshGpu meshes[];
+} meshesBuf;
+
+layout(std430, binding = 3) buffer DrawIds
+{
+    uint drawId[];
+} drawCmds;
+
+layout(std430, binding = 4) buffer Indirect
+{
+    DrawIndexedCmd cmds[];
+} indirectCmds;
+
+layout(std430, binding = 5) buffer DrawCount
+
+{
+    uint count;
+} drawCount;
+
+vec3 rotateQuat(vec3 v, vec4 q)
+{
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
+void main()
+{
+    uint di = gl_GlobalInvocationID.x;
+
+    if (di >= cullData.counts.x)
+        return;
+
+    MeshDraw drawData = drawsBuf.draws[di];
+
+    uint meshIndex = drawData.meta.x;
+    MeshGpu mesh = meshesBuf.meshes[meshIndex];
+
+    vec3 center = rotateQuat(mesh.center_radius.xyz, drawData.orientation) * drawData.position_scale.w + drawData.position_scale.xyz;
+    center = (cullData.view * vec4(center, 1)).xyz;
+    float radius = mesh.center_radius.w * drawData.position_scale.w;
+
+    float viewZ = -center.z;
+    bool visible = true;
+
+    // Frustum culling (symmetric planes)
+    visible = visible && viewZ * cullData.frustum.y - abs(center.x) * cullData.frustum.x > -radius;
+    visible = visible && viewZ * cullData.frustum.w - abs(center.y) * cullData.frustum.z > -radius;
+
+    // Near/far
+    visible = visible && viewZ + radius > cullData.params.x && viewZ - radius < cullData.params.y;
+
+    if (visible)
+    {
+        uint lodIndex = 0;
+
+        if (cullData.counts.y == 1)
+        {
+            float distance = max(viewZ - radius, 1e-4);
+            float scale = max(drawData.position_scale.w, 1e-6);
+            float projScale = 1.0 / max(cullData.frustum.w, 1e-6);
+            float pixelScale = 0.5 * max(cullData.params.w, 1.0);
+
+            int lodCount = int(mesh.meta.z);
+            for (int i = 1; i < lodCount; i += 1)
+            {
+                float errorWorld = mesh.lods[i].error * scale;
+                float ssePixels = (errorWorld / distance) * projScale * pixelScale;
+                if (ssePixels <= cullData.params.z)
+                    lodIndex = i;
+            }
+        }
+
+        MeshLod lod = mesh.lods[lodIndex];
+
+        uint dci = atomicAdd(drawCount.count, 1);
+
+        drawCmds.drawId[dci] = di;
+        indirectCmds.cmds[dci].indexCount = lod.indexCount;
+        indirectCmds.cmds[dci].instanceCount = 1;
+        indirectCmds.cmds[dci].firstIndex = lod.indexOffset;
+        indirectCmds.cmds[dci].vertexOffset = int(mesh.meta.x);
+        indirectCmds.cmds[dci].firstInstance = 0;
+    }
+}

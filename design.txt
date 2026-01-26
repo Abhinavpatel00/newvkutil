@@ -1,0 +1,122 @@
+
+begin_frame()
+record_commands()
+submit_frame()
+present_frame()
+
+
+
+
+RendererBegin(cmd, frame_info)
+RendererDrawMesh(cmd, mesh, material, transform)
+RendererEnd(cmd)
+
+
+
+FrameSync sync = sync_system.acquire()
+queue.submit(sync, cmd)
+sync_system.present(sync)
+
+
+
+bool renderer_begin_frame(Renderer*, FrameContext*)
+void renderer_end_frame(Renderer*, FrameContext*)
+$
+
+Step 1: Extract swapchain handling
+
+Create:
+
+bool renderer_begin_frame(Renderer*, FrameContext*)
+void renderer_end_frame(Renderer*, FrameContext*)
+
+
+Move image acquire, fences, and present inside them.
+
+The loop should shrink
+
+
+
+.Step 2: Extract command recording
+
+Create:
+
+VkCommandBuffer renderer_begin_commands(Renderer*, FrameContext*)
+void renderer_submit_commands(Renderer*, FrameContext*, VkCommandBuffer)
+
+
+
+Move rendering into “record_frame()”
+
+Inside:
+
+void record_frame(Renderer* r, FrameContext* f) {
+    begin_rendering(...)
+    draw_stuff(...)
+    end_rendering(...)
+}
+
+
+Now new rendering features go there instead of main loop cancer.
+
+
+
+while (!should_close()) {
+    poll_events()
+
+    FrameContext* frame;
+    if (!renderer_begin_frame(&renderer, &frame))
+        continue
+
+    VkCommandBuffer cmd = renderer_begin_commands(&renderer, frame)
+
+    record_frame(&renderer, frame, cmd)
+
+    renderer_submit_commands(&renderer, frame, cmd)
+    renderer_end_frame(&renderer, frame)
+}
+
+
+
+
+vkCmdBindPipeline(...);
+
+bind_frame_set();
+bind_material_set();
+bind_object_set();
+
+vkCmdDraw(...);
+
+
+
+set 0 -> bound from frame UBO system
+set 1 -> bound from material system
+set 2 -> bound from object system
+
+
+
+global pool (materials, textures)
+per-frame pool (frame + object descriptors)
+
+
+DescriptorAllocator global_alloc   (persistent)
+DescriptorAllocator frame_alloc[FRAME_COUNT]  (reset every frame)
+
+
+descriptor_allocator_init(&global_alloc, device);
+for each frame:
+    descriptor_allocator_init(&frame_alloc[i], device);
+Use
+Copy code
+set0 = allocate from global_alloc     (camera)
+set1 = allocate from global_alloc     (material)
+set2 = allocate from frame_alloc[cur] (per-object, dynamic)
+Per-frame reset
+scss
+Copy code
+descriptor_allocator_reset(&frame_alloc[cur]);
+
+
+set0 (globals)   → persistent
+set1 (materials) → persistent
+set2 (per-draw)  → per_frame[frame]

@@ -1,0 +1,42 @@
+#version 450
+layout(local_size_x=8, local_size_y=8) in;
+
+layout(set=0,binding=0, r16f) uniform image2D heightMap;
+
+layout(push_constant) uniform Brush {
+    vec2 centerXZ;   // world XZ
+    float radius;
+    float strength;  // + raise, - lower
+    float hardness;  // 0..1
+    vec2 mapMin;     // world min xz
+    vec2 mapMax;     // world max xz
+} brush;
+
+float falloff(float d, float r, float hardness)
+{
+    float t = clamp(d / r, 0.0, 1.0);
+    // harder brush = sharper edge
+    float k = mix(2.0, 12.0, hardness);
+    return pow(1.0 - t, k);
+}
+
+void main()
+{
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(heightMap);
+    if(pix.x >= size.x || pix.y >= size.y) return;
+
+    // map pixel -> world xz
+    vec2 uv = (vec2(pix) + 0.5) / vec2(size);
+    vec2 xz = mix(brush.mapMin, brush.mapMax, uv);
+
+    float d = length(xz - brush.centerXZ);
+    if(d > brush.radius) return;
+
+    float f = falloff(d, brush.radius, brush.hardness);
+
+    float oldH = imageLoad(heightMap, pix).r;
+    float newH = oldH + brush.strength * f;
+
+    imageStore(heightMap, pix, vec4(newH,0,0,0));
+}
