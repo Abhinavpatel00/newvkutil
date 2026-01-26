@@ -37,14 +37,14 @@ static bool g_framebuffer_resized = false;
 
 #define render_pc(cmd, obj, T, value_ptr) render_object_push_constants((cmd), (obj), (value_ptr), sizeof(T))
 
-static const uint32_t TERRAIN_GRID = 256;
-static const float    TERRAIN_CELL = 1.0f;
-static const uint32_t HEIGHTMAP_RES = 512;
-static const uint32_t GRASS_GRID = 256;
+static const uint32_t TERRAIN_GRID         = 256;
+static const float    TERRAIN_CELL         = 1.0f;
+static const uint32_t HEIGHTMAP_RES        = 512;
+static const uint32_t GRASS_GRID           = 256;
 static const uint32_t GRASS_INSTANCE_COUNT = GRASS_GRID * GRASS_GRID;
 
-static const char*    TERRAIN_SAVE_PATH = "terrain_heightmap.bin";
-static const uint32_t TERRAIN_SAVE_MAGIC = 0x54455252u; // 'TERR'
+static const char*    TERRAIN_SAVE_PATH    = "terrain_heightmap.bin";
+static const uint32_t TERRAIN_SAVE_MAGIC   = 0x54455252u;  // 'TERR'
 static const uint32_t TERRAIN_SAVE_VERSION = 1u;
 
 static void framebuffer_resize_callback(GLFWwindow* window, int width, int height)
@@ -79,11 +79,11 @@ static inline VkDeviceSize align_up(VkDeviceSize value, VkDeviceSize alignment)
 }
 
 static inline void render_draw_indirect_count(VkCommandBuffer cmd,
-                                              VkBuffer indirect_buffer,
-                                              VkDeviceSize indirect_offset,
-                                              VkBuffer count_buffer,
-                                              VkDeviceSize count_offset,
-                                              uint32_t draw_count)
+                                              VkBuffer        indirect_buffer,
+                                              VkDeviceSize    indirect_offset,
+                                              VkBuffer        count_buffer,
+                                              VkDeviceSize    count_offset,
+                                              uint32_t        draw_count)
 {
     vkCmdDrawIndexedIndirectCount(cmd, indirect_buffer, indirect_offset, count_buffer, count_offset, draw_count,
                                   sizeof(VkDrawIndexedIndirectCommand));
@@ -99,10 +99,10 @@ typedef struct TerrainPC
     vec2  mapMax;
     vec2  noiseOffset;
     // Brush visualization
-    vec2  brushXZ;       // Current brush world position
-    float brushRadius;   // Brush radius for visualization
-    float brushActive;   // 1.0 if sculpting, 0.0 otherwise
-    float brushDelta;    // -1..1 for direction visualization
+    vec2  brushXZ;      // Current brush world position
+    float brushRadius;  // Brush radius for visualization
+    float brushActive;  // 1.0 if sculpting, 0.0 otherwise
+    float brushDelta;   // -1..1 for direction visualization
 } TerrainPC;
 
 typedef struct GrassPC
@@ -167,49 +167,6 @@ typedef struct TerrainSaveHeader
     float    freq;
 } TerrainSaveHeader;
 
-typedef struct SceneBindings
-{
-    RenderBinding draw_commands;
-    RenderBinding draws;
-    RenderBinding vb;
-    RenderBinding global;
-    RenderBinding materials;
-} SceneBindings;
-
-typedef struct TerrainBindings
-{
-    RenderBinding ubo;
-    RenderBinding heightmap;
-} TerrainBindings;
-
-typedef struct WaterBindings
-{
-    RenderBinding ubo;
-    RenderBinding mat_buf;
-    RenderBinding inst_buf;
-    RenderBinding heightmap;
-} WaterBindings;
-
-typedef struct CullBindings
-{
-    RenderBinding cull_data;
-    RenderBinding draws_buf;
-    RenderBinding meshes_buf;
-    RenderBinding draw_cmds;
-    RenderBinding indirect_cmds;
-    RenderBinding draw_count;
-} CullBindings;
-
-typedef struct TerrainPaintBindings
-{
-    RenderBinding height_map;
-} TerrainPaintBindings;
-
-typedef struct RaymarchBindings
-{
-    RenderBinding params;
-} RaymarchBindings;
-
 static bool file_exists(const char* path)
 {
     FILE* f = fopen(path, "rb");
@@ -219,33 +176,26 @@ static bool file_exists(const char* path)
     return true;
 }
 
-static void terrain_clear_heightmap(VkDevice         device,
-                                    VkQueue          gfx_queue,
-                                    VkCommandPool    pool,
-                                    VkImage          image,
-                                    VkImageLayout*   inout_layout)
+static void terrain_clear_heightmap(VkDevice device, VkQueue gfx_queue, VkCommandPool pool, VkImage image, VkImageLayout* inout_layout)
 {
     VkCommandBuffer cmd = begin_one_time_cmd(device, pool);
     IMAGE_BARRIER_IMMEDIATE(cmd, image, *inout_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    VkClearColorValue clear_val = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}};
-    VkImageSubresourceRange clear_range = {.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-                                           .baseMipLevel   = 0,
-                                           .levelCount     = 1,
-                                           .baseArrayLayer = 0,
-                                           .layerCount     = 1};
+    VkClearColorValue       clear_val   = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}};
+    VkImageSubresourceRange clear_range = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
     vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_val, 1, &clear_range);
     IMAGE_BARRIER_IMMEDIATE(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     end_one_time_cmd(device, gfx_queue, pool, cmd);
     *inout_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
-static bool terrain_save_heightmap(const char*       path,
-                                   ResourceAllocator* allocator,
-                                   VkDevice          device,
-                                   VkQueue           gfx_queue,
-                                   VkCommandPool     pool,
-                                   VkImage           image,
-                                   VkImageLayout*    inout_layout,
+static bool terrain_save_heightmap(const char*              path,
+                                   ResourceAllocator*       allocator,
+                                   VkDevice                 device,
+                                   VkQueue                  gfx_queue,
+                                   VkCommandPool            pool,
+                                   VkImage                  image,
+                                   VkImageLayout*           inout_layout,
                                    const TerrainSaveHeader* header)
 {
     VkDeviceSize data_size = (VkDeviceSize)header->res * (VkDeviceSize)header->res * sizeof(uint16_t);
@@ -261,9 +211,9 @@ static bool terrain_save_heightmap(const char*       path,
         .bufferOffset      = 0,
         .bufferRowLength   = 0,
         .bufferImageHeight = 0,
-        .imageSubresource  = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
-        .imageOffset       = {0, 0, 0},
-        .imageExtent       = {header->res, header->res, 1},
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {header->res, header->res, 1},
     };
     vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer, 1, &region);
 
@@ -287,13 +237,13 @@ static bool terrain_save_heightmap(const char*       path,
     return wrote == (1 + (size_t)data_size);
 }
 
-static bool terrain_load_heightmap(const char*       path,
+static bool terrain_load_heightmap(const char*        path,
                                    ResourceAllocator* allocator,
-                                   VkDevice          device,
-                                   VkQueue           gfx_queue,
-                                   VkCommandPool     pool,
-                                   VkImage           image,
-                                   VkImageLayout*    inout_layout,
+                                   VkDevice           device,
+                                   VkQueue            gfx_queue,
+                                   VkCommandPool      pool,
+                                   VkImage            image,
+                                   VkImageLayout*     inout_layout,
                                    TerrainSaveHeader* out_header)
 {
     FILE* f = fopen(path, "rb");
@@ -306,8 +256,7 @@ static bool terrain_load_heightmap(const char*       path,
         return false;
     }
 
-    if(out_header->magic != TERRAIN_SAVE_MAGIC || out_header->version != TERRAIN_SAVE_VERSION ||
-       out_header->res != HEIGHTMAP_RES)
+    if(out_header->magic != TERRAIN_SAVE_MAGIC || out_header->version != TERRAIN_SAVE_VERSION || out_header->res != HEIGHTMAP_RES)
     {
         fclose(f);
         return false;
@@ -334,9 +283,9 @@ static bool terrain_load_heightmap(const char*       path,
         .bufferOffset      = 0,
         .bufferRowLength   = 0,
         .bufferImageHeight = 0,
-        .imageSubresource  = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
-        .imageOffset       = {0, 0, 0},
-        .imageExtent       = {out_header->res, out_header->res, 1},
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {out_header->res, out_header->res, 1},
     };
     vkCmdCopyBufferToImage(cmd, staging.buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
@@ -348,7 +297,7 @@ static bool terrain_load_heightmap(const char*       path,
     return true;
 }
 
-static uint32_t load_bindless_texture_from_file(BindlessTextures*   bindless,
+static uint32_t load_bindless_texture_from_file(BindlessTextures*  bindless,
                                                 ResourceAllocator* allocator,
                                                 VkDevice           device,
                                                 VkQueue            queue,
@@ -356,7 +305,7 @@ static uint32_t load_bindless_texture_from_file(BindlessTextures*   bindless,
                                                 const char*        path,
                                                 uint32_t           fallback_slot)
 {
-    int w = 0, h = 0, comp = 0;
+    int      w = 0, h = 0, comp = 0;
     stbi_uc* pixels = stbi_load(path, &w, &h, &comp, 4);
     if(!pixels)
     {
@@ -382,8 +331,8 @@ static uint32_t load_bindless_texture_from_file(BindlessTextures*   bindless,
         return fallback_slot;
     }
 
-    tex.bindless_index        = slot;
-    bindless->textures[slot]  = tex;
+    tex.bindless_index       = slot;
+    bindless->textures[slot] = tex;
     bindless_textures_write(bindless, device, slot, tex.view, tex.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     return slot;
 }
@@ -450,14 +399,7 @@ static float terrain_height(float x, float z)
     return h * 8.0f;  // amplitude
 }
 
-static bool screen_to_world_xz_camera(const Camera* cam,
-                                     float         mx,
-                                     float         my,
-                                     float         width,
-                                     float         height,
-                                     float         aspect,
-                                     float         terrain_y,
-                                     vec2          out_xz)
+static bool screen_to_world_xz_camera(const Camera* cam, float mx, float my, float width, float height, float aspect, float terrain_y, vec2 out_xz)
 {
     if(width <= 0.0f || height <= 0.0f)
         return false;
@@ -714,14 +656,14 @@ typedef struct WaterPC
 
 typedef struct ToonPC
 {
-    vec4 light_dir_intensity; // xyz=direction, w=intensity
-    vec4 indirect_min_color;  // rgb=min color, a=multiplier
-    vec4 shadow_map_color;    // rgb=shadow color, a=receiveShadowAmount
-    vec4 outline_color;       // rgb=outline color
-    vec4 params0;             // x=celMidPoint, y=celSoftness, z=outlineWidth, w=outlineZOffset
-    vec4 params1;             // x=useAlphaClip, y=cutoff, z=useEmission, w=emissionMulByBase
-    vec4 params2;             // x=useOcclusion, y=occlusionStrength, z=occlusionRemapStart, w=occlusionRemapEnd
-    vec4 params3;             // x=isFace, y=outlineZOffsetRemapStart, z=outlineZOffsetRemapEnd, w=unused
+    vec4 light_dir_intensity;  // xyz=direction, w=intensity
+    vec4 indirect_min_color;   // rgb=min color, a=multiplier
+    vec4 shadow_map_color;     // rgb=shadow color, a=receiveShadowAmount
+    vec4 outline_color;        // rgb=outline color
+    vec4 params0;              // x=celMidPoint, y=celSoftness, z=outlineWidth, w=outlineZOffset
+    vec4 params1;              // x=useAlphaClip, y=cutoff, z=useEmission, w=emissionMulByBase
+    vec4 params2;              // x=useOcclusion, y=occlusionStrength, z=occlusionRemapStart, w=occlusionRemapEnd
+    vec4 params3;              // x=isFace, y=outlineZOffsetRemapStart, z=outlineZOffsetRemapEnd, w=unused
 } ToonPC;
 
 typedef struct GpuStats
@@ -940,9 +882,9 @@ int main()
     TextureResource tex_gradient = {0};
     TextureResource tex_black    = {0};
 
-    uint32_t checker_slot  = bindless_textures_alloc_slot(&bindless);
-    uint32_t gradient_slot = bindless_textures_alloc_slot(&bindless);
-    uint32_t black_slot    = bindless_textures_alloc_slot(&bindless);
+    uint32_t checker_slot      = bindless_textures_alloc_slot(&bindless);
+    uint32_t gradient_slot     = bindless_textures_alloc_slot(&bindless);
+    uint32_t black_slot        = bindless_textures_alloc_slot(&bindless);
     uint32_t water_normal_slot = 0;
     uint32_t water_foam_slot   = 0;
     uint32_t water_noise_slot  = 0;
@@ -978,21 +920,20 @@ int main()
     bindless_textures_create_rgba8(&allocator, device, qf.graphics_queue, upload_pool, 1, 1, tex_pixels, &tex_black);
     tex_black.bindless_index      = black_slot;
     bindless.textures[black_slot] = tex_black;
-    bindless_textures_write(&bindless, device, black_slot, tex_black.view, tex_black.sampler,
-                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    bindless_textures_write(&bindless, device, black_slot, tex_black.view, tex_black.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     free(tex_pixels);
 
     stbi_set_flip_vertically_on_load(1);
-    water_normal_slot = load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
-                                                        "unity-stylized-water/Assets/Stylized Water/Textures/SmallWaves.TGA",
-                                                        checker_slot);
-    water_foam_slot = load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
-                                                      "unity-stylized-water/Assets/Stylized Water/Textures/Seafoam.TGA",
-                                                      gradient_slot);
-    water_noise_slot = load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
-                                                       "unity-stylized-water/Assets/Stylized Water/Textures/SeaPattern.TGA",
-                                                       checker_slot);
+    water_normal_slot =
+        load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
+                                        "unity-stylized-water/Assets/Stylized Water/Textures/SmallWaves.TGA", checker_slot);
+    water_foam_slot =
+        load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
+                                        "unity-stylized-water/Assets/Stylized Water/Textures/Seafoam.TGA", gradient_slot);
+    water_noise_slot =
+        load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
+                                        "unity-stylized-water/Assets/Stylized Water/Textures/SeaPattern.TGA", checker_slot);
 
     VkDebugText dbg = {0};
     vk_debug_text_init(&dbg, device, &persistent_desc, &desc_cache, &pipe_cache, &swap, "compiledshaders/debug_text.comp.spv");
@@ -1007,31 +948,31 @@ int main()
     cfg.depth_write_enable = true;
     cfg.reloadable         = true;
 
-   RenderObject tri_obj = {0};
-    RenderObject toon_obj = {0};
-    RenderObject toon_outline_obj = {0};
-    RenderObject raymarch_obj = {0};
-    RenderObject terrain_obj = {0};
-    RenderObject grass_obj = {0};
-    RenderObject water_obj = {0};
-    RenderObject cull_obj = {0};
+    RenderObject tri_obj           = {0};
+    RenderObject toon_obj          = {0};
+    RenderObject toon_outline_obj  = {0};
+    RenderObject raymarch_obj      = {0};
+    RenderObject terrain_obj       = {0};
+    RenderObject grass_obj         = {0};
+    RenderObject water_obj         = {0};
+    RenderObject cull_obj          = {0};
     RenderObject terrain_paint_obj = {0};
 
-        RenderObjectInstance toon_inst = {0};
-        RenderObjectInstance toon_outline_inst = {0};
-        RenderObjectInstance tri_inst = {0};
-        RenderObjectInstance terrain_inst = {0};
-        RenderObjectInstance grass_inst = {0};
-        RenderObjectInstance water_ro_inst = {0};
-        RenderObjectInstance cull_inst = {0};
-        RenderObjectInstance terrain_paint_inst = {0};
-        RenderObjectInstance raymarch_inst = {0};
+    RenderObjectInstance toon_inst          = {0};
+    RenderObjectInstance toon_outline_inst  = {0};
+    RenderObjectInstance tri_inst           = {0};
+    RenderObjectInstance terrain_inst       = {0};
+    RenderObjectInstance grass_inst         = {0};
+    RenderObjectInstance water_ro_inst      = {0};
+    RenderObjectInstance cull_inst          = {0};
+    RenderObjectInstance terrain_paint_inst = {0};
+    RenderObjectInstance raymarch_inst      = {0};
 
-    RenderObjectSpec tri_spec = render_object_spec_from_config(&cfg);
-    tri_spec.vert_spv               = "compiledshaders/tri.vert.spv";
-    tri_spec.frag_spv               = "compiledshaders/tri.frag.spv";
-    tri_spec.use_vertex_input       = VK_FALSE;
-    tri_spec.allow_update_after_bind = VK_TRUE;
+    RenderObjectSpec tri_spec          = render_object_spec_from_config(&cfg);
+    tri_spec.vert_spv                  = "compiledshaders/tri.vert.spv";
+    tri_spec.frag_spv                  = "compiledshaders/tri.frag.spv";
+    tri_spec.use_vertex_input          = VK_FALSE;
+    tri_spec.allow_update_after_bind   = VK_TRUE;
     tri_spec.use_bindless_if_available = VK_TRUE;
     tri_spec.bindless_descriptor_count = bindless.max_textures;
 
@@ -1039,39 +980,41 @@ int main()
     render_object_set_external_set(&tri_obj, "u_textures", bindless.set);
     tri_inst = render_instance_create(&tri_obj.pipeline, &tri_obj.resources);
 
-    RenderObjectSpec toon_spec = render_object_spec_from_config(&cfg);
-    toon_spec.vert_spv                 = "compiledshaders/toon.vert.spv";
-    toon_spec.frag_spv                 = "compiledshaders/toon.frag.spv";
-    toon_spec.use_vertex_input         = VK_FALSE;
-    toon_spec.allow_update_after_bind  = VK_TRUE;
+    RenderObjectSpec toon_spec          = render_object_spec_from_config(&cfg);
+    toon_spec.vert_spv                  = "compiledshaders/toon.vert.spv";
+    toon_spec.frag_spv                  = "compiledshaders/toon.frag.spv";
+    toon_spec.use_vertex_input          = VK_FALSE;
+    toon_spec.allow_update_after_bind   = VK_TRUE;
     toon_spec.use_bindless_if_available = VK_TRUE;
     toon_spec.bindless_descriptor_count = bindless.max_textures;
 
     toon_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &toon_spec, 1);
     render_object_set_external_set(&toon_obj, "u_textures", bindless.set);
-        toon_inst = render_instance_create(&toon_obj.pipeline, &toon_obj.resources);
+    toon_inst = render_instance_create(&toon_obj.pipeline, &toon_obj.resources);
 
     RenderObjectSpec toon_outline_spec = toon_spec;
-    toon_outline_spec.frag_spv = "compiledshaders/toon_outline.frag.spv";
-    toon_outline_spec.depth_write = VK_FALSE;
-    toon_outline_spec.cull_mode = VK_CULL_MODE_FRONT_BIT;
+    toon_outline_spec.frag_spv         = "compiledshaders/toon_outline.frag.spv";
+    toon_outline_spec.depth_write      = VK_FALSE;
+    toon_outline_spec.cull_mode        = VK_CULL_MODE_FRONT_BIT;
 
-    toon_outline_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &toon_outline_spec, 1);
+    toon_outline_obj =
+        render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &toon_outline_spec, 1);
     render_object_set_external_set(&toon_outline_obj, "u_textures", bindless.set);
-        toon_outline_inst = render_instance_create(&toon_outline_obj.pipeline, &toon_outline_obj.resources);
+    toon_outline_inst = render_instance_create(&toon_outline_obj.pipeline, &toon_outline_obj.resources);
 
     RenderObjectSpec cull_spec = render_object_spec_default();
-    cull_spec.comp_spv = "compiledshaders/cull.comp.spv";
-    cull_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &cull_spec, 1);
+    cull_spec.comp_spv         = "compiledshaders/cull.comp.spv";
+    cull_obj  = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &cull_spec, 1);
     cull_inst = render_instance_create(&cull_obj.pipeline, &cull_obj.resources);
 
     RenderObjectSpec terrain_paint_spec = render_object_spec_default();
-    terrain_paint_spec.comp_spv = "compiledshaders/terrain_paint.comp.spv";
-    terrain_paint_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &terrain_paint_spec, 1);
+    terrain_paint_spec.comp_spv         = "compiledshaders/terrain_paint.comp.spv";
+    terrain_paint_obj =
+        render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &terrain_paint_spec, 1);
     terrain_paint_inst = render_instance_create(&terrain_paint_obj.pipeline, &terrain_paint_obj.resources);
 
 
-    RenderObjectSpec raymarch_spec = render_object_spec_default();
+    RenderObjectSpec raymarch_spec       = render_object_spec_default();
     raymarch_spec.vert_spv               = "compiledshaders/fullscreen.vert.spv";
     raymarch_spec.frag_spv               = "compiledshaders/fullscreen.frag.spv";
     raymarch_spec.topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -1089,12 +1032,12 @@ int main()
     raymarch_spec.stencil_format         = VK_FORMAT_UNDEFINED;
 
     raymarch_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &raymarch_spec, 1);
-    raymarch_inst = render_instance_create(&raymarch_obj.pipeline, &raymarch_obj.resources);
-    BufferArena host_arena = {0};
-    BufferArena device_arena = {0};
-    BufferSlice global_ubo_buf = {0};
-    BufferSlice cull_data_buffer = {0};
-    BufferSlice raymarch_ubo = {0};
+    raymarch_inst                  = render_instance_create(&raymarch_obj.pipeline, &raymarch_obj.resources);
+    BufferArena host_arena         = {0};
+    BufferArena device_arena       = {0};
+    BufferSlice global_ubo_buf     = {0};
+    BufferSlice cull_data_buffer   = {0};
+    BufferSlice raymarch_ubo       = {0};
     BufferSlice water_material_buf = {0};
     BufferSlice water_instance_buf = {0};
 
@@ -1102,41 +1045,37 @@ int main()
     BufferSlice mesh_buffer       = {0};
     BufferSlice draw_count_buffer = {0};
 
-    buffer_arena_init(&allocator,
-                      2 * 1024 * 1024,
-                      VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT,
+    buffer_arena_init(&allocator, 2 * 1024 * 1024, VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT,
                       VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
-                      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-                      256,
-                      &host_arena);
+                      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, 256, &host_arena);
 
-    raymarch_ubo = buffer_arena_alloc(&host_arena, sizeof(RaymarchUBO), 256);
-    global_ubo_buf = buffer_arena_alloc(&host_arena, sizeof(GlobalUBO), 256);
-    cull_data_buffer = buffer_arena_alloc(&host_arena, sizeof(CullDataGpu), 256);
+    raymarch_ubo       = buffer_arena_alloc(&host_arena, sizeof(RaymarchUBO), 256);
+    global_ubo_buf     = buffer_arena_alloc(&host_arena, sizeof(GlobalUBO), 256);
+    cull_data_buffer   = buffer_arena_alloc(&host_arena, sizeof(CullDataGpu), 256);
     water_material_buf = buffer_arena_alloc(&host_arena, sizeof(WaterMaterialGpu), 256);
     water_instance_buf = buffer_arena_alloc(&host_arena, sizeof(WaterInstanceGpu), 256);
 
-    VkImage       heightmap_image  = VK_NULL_HANDLE;
-    VkImageView   heightmap_view   = VK_NULL_HANDLE;
-    VmaAllocation heightmap_alloc  = NULL;
+    VkImage       heightmap_image   = VK_NULL_HANDLE;
+    VkImageView   heightmap_view    = VK_NULL_HANDLE;
+    VmaAllocation heightmap_alloc   = NULL;
     VkSampler     heightmap_sampler = VK_NULL_HANDLE;
-    VkImageLayout heightmap_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout heightmap_layout  = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkTerrainGuiParams terrain_gui = {
-        .height_scale  = 20.0f,
-        .freq          = 0.02f,
-        .noise_offset  = {0.0f, 0.0f},
-        .brush_radius  = 8.0f,
+        .height_scale   = 20.0f,
+        .freq           = 0.02f,
+        .noise_offset   = {0.0f, 0.0f},
+        .brush_radius   = 8.0f,
         .brush_strength = 0.15f,
         .brush_hardness = 0.4f,
     };
 
-    VkImageCreateInfo heightmap_info = VK_IMAGE_DEFAULT_2D(HEIGHTMAP_RES, HEIGHTMAP_RES, VK_FORMAT_R16_SFLOAT,
-                                                           VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
-                                                               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    VkImageCreateInfo       heightmap_info = VK_IMAGE_DEFAULT_2D(HEIGHTMAP_RES, HEIGHTMAP_RES, VK_FORMAT_R16_SFLOAT,
+                                                                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                                                                     | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VmaAllocationCreateInfo heightmap_alloc_info = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-    res_create_image(&allocator, &heightmap_info, heightmap_alloc_info.usage, heightmap_alloc_info.flags, &heightmap_image,
-                     &heightmap_alloc);
+    res_create_image(&allocator, &heightmap_info, heightmap_alloc_info.usage, heightmap_alloc_info.flags,
+                     &heightmap_image, &heightmap_alloc);
 
     VkImageViewCreateInfo heightmap_view_info = VK_IMAGE_VIEW_DEFAULT(heightmap_image, VK_FORMAT_R16_SFLOAT);
     VK_CHECK(vkCreateImageView(device, &heightmap_view_info, NULL, &heightmap_view));
@@ -1160,18 +1099,18 @@ int main()
     };
     VK_CHECK(vkCreateSampler(device, &sampler_info, NULL, &heightmap_sampler));
 
-    bool heightmap_loaded = false;
-    TerrainSaveHeader loaded_header = {0};
+    bool              heightmap_loaded = false;
+    TerrainSaveHeader loaded_header    = {0};
     if(file_exists(TERRAIN_SAVE_PATH))
     {
-        if(terrain_load_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool, heightmap_image,
-                                  &heightmap_layout, &loaded_header))
+        if(terrain_load_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool,
+                                  heightmap_image, &heightmap_layout, &loaded_header))
         {
-            terrain_gui.height_scale = loaded_header.heightScale;
-            terrain_gui.freq         = loaded_header.freq;
+            terrain_gui.height_scale    = loaded_header.heightScale;
+            terrain_gui.freq            = loaded_header.freq;
             terrain_gui.noise_offset[0] = loaded_header.noiseOffset[0];
             terrain_gui.noise_offset[1] = loaded_header.noiseOffset[1];
-            heightmap_loaded = true;
+            heightmap_loaded            = true;
             printf("[TERRAIN] Loaded heightmap from %s\n", TERRAIN_SAVE_PATH);
         }
     }
@@ -1193,21 +1132,21 @@ int main()
     terrain_inst = render_instance_create(&terrain_obj.pipeline, &terrain_obj.resources);
 
     RenderObjectSpec grass_spec = terrain_spec;
-    grass_spec.vert_spv           = "compiledshaders/grass.vert.spv";
-    grass_spec.frag_spv           = "compiledshaders/grass.frag.spv";
-    grass_spec.use_vertex_input   = VK_FALSE;
-    grass_spec.cull_mode          = VK_CULL_MODE_NONE;
-    grass_spec.blend_enable       = VK_FALSE;
+    grass_spec.vert_spv         = "compiledshaders/grass.vert.spv";
+    grass_spec.frag_spv         = "compiledshaders/grass.frag.spv";
+    grass_spec.use_vertex_input = VK_FALSE;
+    grass_spec.cull_mode        = VK_CULL_MODE_NONE;
+    grass_spec.blend_enable     = VK_FALSE;
 
     grass_obj = render_object_create(device, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &grass_spec, 1);
     grass_inst = render_instance_create(&grass_obj.pipeline, &grass_obj.resources);
 
-    RenderObjectSpec water_spec = render_object_spec_from_config(&cfg);
-    water_spec.vert_spv         = "compiledshaders/water.vert.spv";
-    water_spec.frag_spv         = "compiledshaders/water.frag.spv";
-    water_spec.depth_write      = VK_FALSE;
-    water_spec.use_vertex_input = VK_TRUE;
-    water_spec.allow_update_after_bind = VK_TRUE;
+    RenderObjectSpec water_spec          = render_object_spec_from_config(&cfg);
+    water_spec.vert_spv                  = "compiledshaders/water.vert.spv";
+    water_spec.frag_spv                  = "compiledshaders/water.frag.spv";
+    water_spec.depth_write               = VK_FALSE;
+    water_spec.use_vertex_input          = VK_TRUE;
+    water_spec.allow_update_after_bind   = VK_TRUE;
     water_spec.use_bindless_if_available = VK_TRUE;
     water_spec.bindless_descriptor_count = bindless.max_textures;
 
@@ -1265,7 +1204,7 @@ int main()
         printf("Loaded: %s at (%.2f %.2f %.2f)\n", entries[i].label, entries[i].pos[0], entries[i].pos[1], entries[i].pos[2]);
     }
 
-    uint32_t texture_count = (uint32_t)arrlen(scene.texturePaths);
+    uint32_t  texture_count = (uint32_t)arrlen(scene.texturePaths);
     uint32_t* texture_slots = NULL;
     if(texture_count > 0)
     {
@@ -1281,8 +1220,8 @@ int main()
         {
             const char* path = scene.texturePaths[i];
             if(path && path[0] != '\0')
-                texture_slots[i] = load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue,
-                                                                   upload_pool, path, 0);
+                texture_slots[i] =
+                    load_bindless_texture_from_file(&bindless, &allocator, device, qf.graphics_queue, upload_pool, path, 0);
             else
                 texture_slots[i] = 0;
         }
@@ -1332,23 +1271,20 @@ int main()
     free(texture_slots);
 
 
-    uint32_t     draw_count      = (uint32_t)arrlen(scene.draws);
-    MeshDrawGpu* draws_cpu       = malloc(sizeof(MeshDrawGpu) * draw_count);
-    BufferSlice  draw_cmd_buffer = {0};
-    BufferSlice  draws_buffer    = {0};
-    BufferSlice  indirect_buffer = {0};
+    uint32_t     draw_count               = (uint32_t)arrlen(scene.draws);
+    MeshDrawGpu* draws_cpu                = malloc(sizeof(MeshDrawGpu) * draw_count);
+    BufferSlice  draw_cmd_buffer          = {0};
+    BufferSlice  draws_buffer             = {0};
+    BufferSlice  indirect_buffer          = {0};
     Buffer       indirect_fallback_buffer = {0};
-    bool         indirect_uses_fallback = false;
-            printf("scene meshes=%u vertices=%u indices=%u\n", (uint32_t)arrlen(scene.geometry.meshes),
-                (uint32_t)arrlen(scene.geometry.vertices), (uint32_t)arrlen(scene.geometry.indices));
+    bool         indirect_uses_fallback   = false;
+    printf("scene meshes=%u vertices=%u indices=%u\n", (uint32_t)arrlen(scene.geometry.meshes),
+           (uint32_t)arrlen(scene.geometry.vertices), (uint32_t)arrlen(scene.geometry.indices));
     GpuMeshBuffers gpu_scene = {0};
 
-        VkDeviceSize vb_size = (VkDeviceSize)arrlen(scene.geometry.vertices) * sizeof(VertexPacked);
-        VkDeviceSize ib_size = (VkDeviceSize)arrlen(scene.geometry.indices) * sizeof(uint32_t);
-        printf("scene draws=%u vb=%llu ib=%llu\n",
-            draw_count,
-            (unsigned long long)vb_size,
-            (unsigned long long)ib_size);
+    VkDeviceSize vb_size = (VkDeviceSize)arrlen(scene.geometry.vertices) * sizeof(VertexPacked);
+    VkDeviceSize ib_size = (VkDeviceSize)arrlen(scene.geometry.indices) * sizeof(uint32_t);
+    printf("scene draws=%u vb=%llu ib=%llu\n", draw_count, (unsigned long long)vb_size, (unsigned long long)ib_size);
 
     res_create_buffer(&allocator, vb_size,
                       VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
@@ -1427,69 +1363,60 @@ int main()
     }
 
 
-    VkDeviceSize draw_cmd_bytes = (VkDeviceSize)draw_count * sizeof(MeshDrawCommand);
-    VkDeviceSize draws_bytes    = (VkDeviceSize)draw_count * sizeof(MeshDrawGpu);
+    VkDeviceSize draw_cmd_bytes   = (VkDeviceSize)draw_count * sizeof(MeshDrawCommand);
+    VkDeviceSize draws_bytes      = (VkDeviceSize)draw_count * sizeof(MeshDrawGpu);
     VkDeviceSize draw_count_bytes = sizeof(uint32_t);
-    VkDeviceSize indirect_bytes = (VkDeviceSize)draw_count * sizeof(VkDrawIndexedIndirectCommand);
+    VkDeviceSize indirect_bytes   = (VkDeviceSize)draw_count * sizeof(VkDrawIndexedIndirectCommand);
 
     VkDeviceSize device_arena_size = 0;
-    device_arena_size = align_up(device_arena_size, 256) + material_bytes;
-    device_arena_size = align_up(device_arena_size, 256) + mesh_bytes;
-    device_arena_size = align_up(device_arena_size, 256) + draw_count_bytes;
-    device_arena_size = align_up(device_arena_size, 256) + draw_cmd_bytes;
-    device_arena_size = align_up(device_arena_size, 256) + draws_bytes;
-    device_arena_size = align_up(device_arena_size, 256) + indirect_bytes;
+    device_arena_size              = align_up(device_arena_size, 256) + material_bytes;
+    device_arena_size              = align_up(device_arena_size, 256) + mesh_bytes;
+    device_arena_size              = align_up(device_arena_size, 256) + draw_count_bytes;
+    device_arena_size              = align_up(device_arena_size, 256) + draw_cmd_bytes;
+    device_arena_size              = align_up(device_arena_size, 256) + draws_bytes;
+    device_arena_size              = align_up(device_arena_size, 256) + indirect_bytes;
 
-    buffer_arena_init(&allocator,
-                      device_arena_size,
+    buffer_arena_init(&allocator, device_arena_size,
                       VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT,
-                      VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-                      0,
-                      256,
-                      &device_arena);
+                      VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, 256, &device_arena);
 
-    material_buffer = buffer_arena_alloc(&device_arena, material_bytes, 256);
-    mesh_buffer = buffer_arena_alloc(&device_arena, mesh_bytes, 256);
+    material_buffer   = buffer_arena_alloc(&device_arena, material_bytes, 256);
+    mesh_buffer       = buffer_arena_alloc(&device_arena, mesh_bytes, 256);
     draw_count_buffer = buffer_arena_alloc(&device_arena, draw_count_bytes, 256);
-    draw_cmd_buffer = buffer_arena_alloc(&device_arena, draw_cmd_bytes, 256);
-    draws_buffer = buffer_arena_alloc(&device_arena, draws_bytes, 256);
-    indirect_buffer = buffer_arena_alloc(&device_arena, indirect_bytes, 256);
+    draw_cmd_buffer   = buffer_arena_alloc(&device_arena, draw_cmd_bytes, 256);
+    draws_buffer      = buffer_arena_alloc(&device_arena, draws_bytes, 256);
+    indirect_buffer   = buffer_arena_alloc(&device_arena, indirect_bytes, 256);
     if(indirect_buffer.buffer == VK_NULL_HANDLE)
     {
         VkDeviceSize fallback_bytes = indirect_bytes;
         if(fallback_bytes == 0)
             fallback_bytes = sizeof(VkDrawIndexedIndirectCommand);
 
-        res_create_buffer(&allocator,
-                          fallback_bytes,
-                          VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT |
-                              VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT,
-                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-                          0,
-                          256,
-                          &indirect_fallback_buffer);
+        res_create_buffer(&allocator, fallback_bytes,
+                          VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT,
+                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, 256, &indirect_fallback_buffer);
 
-        indirect_buffer.buffer = indirect_fallback_buffer.buffer;
-        indirect_buffer.offset = 0;
-        indirect_buffer.size = fallback_bytes;
+        indirect_buffer.buffer  = indirect_fallback_buffer.buffer;
+        indirect_buffer.offset  = 0;
+        indirect_buffer.size    = fallback_bytes;
         indirect_buffer.mapping = NULL;
         indirect_buffer.address = indirect_fallback_buffer.address;
-        indirect_uses_fallback = true;
+        indirect_uses_fallback  = true;
     }
     MeshDrawCommand* init_cmds = malloc(draw_count * sizeof(MeshDrawCommand));
     for(uint32_t i = 0; i < draw_count; i++)
         init_cmds[i].drawId = i;
 
-    upload_to_gpu_buffer(&allocator, qf.graphics_queue, upload_pool, draw_cmd_buffer.buffer, draw_cmd_buffer.offset, init_cmds,
-                         draw_count * sizeof(MeshDrawCommand));
+    upload_to_gpu_buffer(&allocator, qf.graphics_queue, upload_pool, draw_cmd_buffer.buffer, draw_cmd_buffer.offset,
+                         init_cmds, draw_count * sizeof(MeshDrawCommand));
 
     free(init_cmds);
 
 
     upload_to_gpu_buffer(&allocator, qf.graphics_queue, upload_pool, draws_buffer.buffer, draws_buffer.offset, draws_cpu, draws_bytes);
 
-    upload_to_gpu_buffer(&allocator, qf.graphics_queue, upload_pool, material_buffer.buffer, material_buffer.offset, materials_gpu,
-                         material_bytes);
+    upload_to_gpu_buffer(&allocator, qf.graphics_queue, upload_pool, material_buffer.buffer, material_buffer.offset,
+                         materials_gpu, material_bytes);
     upload_to_gpu_buffer(&allocator, qf.graphics_queue, upload_pool, mesh_buffer.buffer, mesh_buffer.offset, meshes_gpu, mesh_bytes);
 
     free(materials_gpu);
@@ -1508,7 +1435,7 @@ int main()
     free(tverts);
     free(tinds);
 
-    float terrain_half = ((float)TERRAIN_GRID - 1.0f) * TERRAIN_CELL * 0.5f;
+    float terrain_half    = ((float)TERRAIN_GRID - 1.0f) * TERRAIN_CELL * 0.5f;
     vec2  terrain_map_min = {-terrain_half, -terrain_half};
     vec2  terrain_map_max = {terrain_half, terrain_half};
 
@@ -1537,25 +1464,19 @@ int main()
         RW_BUF_O("g", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
         RW_BUF_O("materials_buf", material_buffer.buffer, material_buffer.offset, material_bytes),
     };
-    render_object_write_static(&toon_outline_obj,
-                               outline_writes,
-                               (uint32_t)(sizeof(outline_writes) / sizeof(outline_writes[0])));
+    render_object_write_static(&toon_outline_obj, outline_writes, (uint32_t)(sizeof(outline_writes) / sizeof(outline_writes[0])));
 
     RenderWrite terrain_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
         RW_IMG("uHeightMap", heightmap_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
-    render_object_write_static(&terrain_obj,
-                               terrain_writes,
-                               (uint32_t)(sizeof(terrain_writes) / sizeof(terrain_writes[0])));
+    render_object_write_static(&terrain_obj, terrain_writes, (uint32_t)(sizeof(terrain_writes) / sizeof(terrain_writes[0])));
 
     RenderWrite grass_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
         RW_IMG("uHeightMap", heightmap_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
-    render_object_write_static(&grass_obj,
-                               grass_writes,
-                               (uint32_t)(sizeof(grass_writes) / sizeof(grass_writes[0])));
+    render_object_write_static(&grass_obj, grass_writes, (uint32_t)(sizeof(grass_writes) / sizeof(grass_writes[0])));
 
     RenderWrite water_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
@@ -1563,38 +1484,29 @@ int main()
         RW_BUF_O("inst_buf", water_instance_buf.buffer, water_instance_buf.offset, sizeof(WaterInstanceGpu)),
         RW_IMG("uHeightMap", heightmap_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
-    render_object_write_static(&water_obj,
-                               water_writes,
-                               (uint32_t)(sizeof(water_writes) / sizeof(water_writes[0])));
+    render_object_write_static(&water_obj, water_writes, (uint32_t)(sizeof(water_writes) / sizeof(water_writes[0])));
 
     RenderWrite cull_writes[] = {
         RW_BUF_O("cullData", cull_data_buffer.buffer, cull_data_buffer.offset, sizeof(CullDataGpu)),
-         RW_BUF_O("drawsBuf", draws_buffer.buffer, draws_buffer.offset, draws_bytes),
-         RW_BUF_O("meshesBuf", mesh_buffer.buffer, mesh_buffer.offset, mesh_bytes),
-         RW_BUF_O("drawCmds", draw_cmd_buffer.buffer, draw_cmd_buffer.offset, draw_cmd_bytes),
-         RW_BUF_O("indirectCmds",
-               indirect_buffer.buffer,
-               indirect_buffer.offset,
-               (VkDeviceSize)draw_count * sizeof(VkDrawIndexedIndirectCommand)),
-         RW_BUF_O("drawCount", draw_count_buffer.buffer, draw_count_buffer.offset, sizeof(uint32_t)),
+        RW_BUF_O("drawsBuf", draws_buffer.buffer, draws_buffer.offset, draws_bytes),
+        RW_BUF_O("meshesBuf", mesh_buffer.buffer, mesh_buffer.offset, mesh_bytes),
+        RW_BUF_O("drawCmds", draw_cmd_buffer.buffer, draw_cmd_buffer.offset, draw_cmd_bytes),
+        RW_BUF_O("indirectCmds", indirect_buffer.buffer, indirect_buffer.offset,
+                 (VkDeviceSize)draw_count * sizeof(VkDrawIndexedIndirectCommand)),
+        RW_BUF_O("drawCount", draw_count_buffer.buffer, draw_count_buffer.offset, sizeof(uint32_t)),
     };
-    render_object_write_static(&cull_obj,
-                               cull_writes,
-                               (uint32_t)(sizeof(cull_writes) / sizeof(cull_writes[0])));
+    render_object_write_static(&cull_obj, cull_writes, (uint32_t)(sizeof(cull_writes) / sizeof(cull_writes[0])));
 
     RenderWrite terrain_paint_writes[] = {
         RW_IMG("heightMap", heightmap_view, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL),
     };
-    render_object_write_static(&terrain_paint_obj,
-                               terrain_paint_writes,
+    render_object_write_static(&terrain_paint_obj, terrain_paint_writes,
                                (uint32_t)(sizeof(terrain_paint_writes) / sizeof(terrain_paint_writes[0])));
 
     RenderWrite raymarch_writes[] = {
         RW_BUF_O("params", raymarch_ubo.buffer, raymarch_ubo.offset, sizeof(RaymarchUBO)),
     };
-    render_object_write_static(&raymarch_obj,
-                               raymarch_writes,
-                               (uint32_t)(sizeof(raymarch_writes) / sizeof(raymarch_writes[0])));
+    render_object_write_static(&raymarch_obj, raymarch_writes, (uint32_t)(sizeof(raymarch_writes) / sizeof(raymarch_writes[0])));
 
 
     Camera cam = {0};
@@ -1611,9 +1523,9 @@ int main()
 
     srand((unsigned)time(NULL));
 
-    bool sculpt_mode = false;
+    bool sculpt_mode        = false;
     bool last_sculpt_toggle = false;
-    
+
     // Sculpting brush parameters (Tiny Glade style)
     float terrain_avg_height = 10.0f;  // Approximate average terrain height for picking
 
@@ -1626,76 +1538,76 @@ int main()
     };
 
     VkWaterGuiParams water_gui = {
-        .enabled        = true,
-        .foam_enabled   = true,
-        .fresnel_enabled = true,
-        .specular_enabled = true,
-        .water_height   = 8.0f,
-        .depth_fade     = 12.0f,
-        .foam_distance  = 2.0f,
-        .foam_scale     = 1.5f,
-        .foam_speed     = 0.6f,
-        .normal_scale   = 0.8f,
-        .normal_scale2  = 0.5f,
-        .specular       = 0.6f,
-        .spec_power     = 64.0f,
-        .opacity        = 0.75f,
-        .tiling         = 1.5f,
-        .foam_tiling    = 2.5f,
-        .normal_speed   = 0.05f,
-        .normal_speed2  = 0.08f,
-        .foam_strength  = 1.0f,
-        .fresnel_power  = 4.0f,
-        .fresnel_strength = 0.8f,
-        .color_variation = 0.25f,
+        .enabled             = true,
+        .foam_enabled        = true,
+        .fresnel_enabled     = true,
+        .specular_enabled    = true,
+        .water_height        = 8.0f,
+        .depth_fade          = 12.0f,
+        .foam_distance       = 2.0f,
+        .foam_scale          = 1.5f,
+        .foam_speed          = 0.6f,
+        .normal_scale        = 0.8f,
+        .normal_scale2       = 0.5f,
+        .specular            = 0.6f,
+        .spec_power          = 64.0f,
+        .opacity             = 0.75f,
+        .tiling              = 1.5f,
+        .foam_tiling         = 2.5f,
+        .normal_speed        = 0.05f,
+        .normal_speed2       = 0.08f,
+        .foam_strength       = 1.0f,
+        .fresnel_power       = 4.0f,
+        .fresnel_strength    = 0.8f,
+        .color_variation     = 0.25f,
         .distortion_strength = 0.35f,
-        .sun_dir        = {0.3f, 1.0f, 0.2f},
-        .sun_intensity  = 1.0f,
-        .shallow_color  = {0.10f, 0.55f, 0.75f},
-        .deep_color     = {0.03f, 0.18f, 0.30f},
-        .foam_color     = {0.90f, 0.96f, 1.00f},
+        .sun_dir             = {0.3f, 1.0f, 0.2f},
+        .sun_intensity       = 1.0f,
+        .shallow_color       = {0.10f, 0.55f, 0.75f},
+        .deep_color          = {0.03f, 0.18f, 0.30f},
+        .foam_color          = {0.90f, 0.96f, 1.00f},
     };
 
     VkToonGuiParams toon_gui = {
-        .enabled = true,
-        .light_dir = {0.3f, 1.0f, 0.2f},
-        .light_intensity = 1.0f,
-        .indirect_min_color = {0.1f, 0.1f, 0.1f},
-        .indirect_multiplier = 1.0f,
-        .shadow_color = {1.0f, 0.825f, 0.78f},
-        .receive_shadow = 0.65f,
-        .outline_color = {0.5f, 0.5f, 0.5f},
-        .outline_width = 1.0f,
-        .outline_z_offset = 0.0001f,
+        .enabled               = true,
+        .light_dir             = {0.3f, 1.0f, 0.2f},
+        .light_intensity       = 1.0f,
+        .indirect_min_color    = {0.1f, 0.1f, 0.1f},
+        .indirect_multiplier   = 1.0f,
+        .shadow_color          = {1.0f, 0.825f, 0.78f},
+        .receive_shadow        = 0.65f,
+        .outline_color         = {0.5f, 0.5f, 0.5f},
+        .outline_width         = 1.0f,
+        .outline_z_offset      = 0.0001f,
         .outline_z_remap_start = 0.0f,
-        .outline_z_remap_end = 1.0f,
-        .cel_mid = -0.5f,
-        .cel_soft = 0.05f,
-        .use_alpha_clip = false,
-        .cutoff = 0.5f,
-        .use_emission = false,
-        .emission_mul_by_base = 0.0f,
-        .use_occlusion = false,
-        .occlusion_strength = 1.0f,
+        .outline_z_remap_end   = 1.0f,
+        .cel_mid               = -0.5f,
+        .cel_soft              = 0.05f,
+        .use_alpha_clip        = false,
+        .cutoff                = 0.5f,
+        .use_emission          = false,
+        .emission_mul_by_base  = 0.0f,
+        .use_occlusion         = false,
+        .occlusion_strength    = 1.0f,
         .occlusion_remap_start = 0.0f,
-        .occlusion_remap_end = 1.0f,
-        .is_face = false,
+        .occlusion_remap_end   = 1.0f,
+        .is_face               = false,
     };
 
     VkTerrainGuiActions terrain_actions = {0};
-    
+
     // Drag sculpting state
-    bool  sculpt_dragging = false;
-    vec2  sculpt_anchor_xz = {0.0f, 0.0f};  // World XZ where user clicked
-    float sculpt_last_my = 0.0f;            // Mouse Y at last drag update
-    vec2  brush_hover_xz = {0.0f, 0.0f};    // Current hover position for visualization
+    bool  sculpt_dragging   = false;
+    vec2  sculpt_anchor_xz  = {0.0f, 0.0f};  // World XZ where user clicked
+    float sculpt_last_my    = 0.0f;          // Mouse Y at last drag update
+    vec2  brush_hover_xz    = {0.0f, 0.0f};  // Current hover position for visualization
     bool  brush_hover_valid = false;
 
-    bool request_save = false;
-    bool request_load = false;
-    bool request_regen = false;
-    bool last_save_key = false;
-    bool last_load_key = false;
+    bool request_save   = false;
+    bool request_load   = false;
+    bool request_regen  = false;
+    bool last_save_key  = false;
+    bool last_load_key  = false;
     bool last_regen_key = false;
 
 
@@ -1743,15 +1655,15 @@ int main()
         if(terrain_actions.regenerate)
             request_regen = true;
 
-        terrain_actions.save = false;
-        terrain_actions.load = false;
+        terrain_actions.save       = false;
+        terrain_actions.load       = false;
         terrain_actions.regenerate = false;
 
-        ImGuiIO* io = igGetIO_Nil();
-        bool imgui_capture_mouse = gui.enabled && io->WantCaptureMouse;
-        bool imgui_capture_kb = gui.enabled && io->WantCaptureKeyboard;
+        ImGuiIO* io                  = igGetIO_Nil();
+        bool     imgui_capture_mouse = gui.enabled && io->WantCaptureMouse;
+        bool     imgui_capture_kb    = gui.enabled && io->WantCaptureKeyboard;
 
-        
+
         // Brush adjustments (only in sculpt mode)
         if(sculpt_mode && !imgui_capture_kb)
         {
@@ -1761,16 +1673,16 @@ int main()
                 terrain_gui.brush_strength = fmaxf(terrain_gui.brush_strength - 0.005f, 0.01f);
             if(glfwGetKey(window, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS)  // ]
                 terrain_gui.brush_hardness = fminf(terrain_gui.brush_hardness + 0.01f, 1.0f);
-            if(glfwGetKey(window, GLFW_KEY_LEFT_BRACKET) == GLFW_PRESS)   // [
+            if(glfwGetKey(window, GLFW_KEY_LEFT_BRACKET) == GLFW_PRESS)  // [
                 terrain_gui.brush_hardness = fmaxf(terrain_gui.brush_hardness - 0.01f, 0.0f);
             if(glfwGetKey(window, GLFW_KEY_PERIOD) == GLFW_PRESS)  // . (bigger brush)
                 terrain_gui.brush_radius = fminf(terrain_gui.brush_radius + 0.2f, 50.0f);
-            if(glfwGetKey(window, GLFW_KEY_COMMA) == GLFW_PRESS)   // , (smaller brush)
+            if(glfwGetKey(window, GLFW_KEY_COMMA) == GLFW_PRESS)  // , (smaller brush)
                 terrain_gui.brush_radius = fmaxf(terrain_gui.brush_radius - 0.2f, 1.0f);
         }
 
-        bool save_key = glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS;
-        bool load_key = glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS;
+        bool save_key  = glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS;
+        bool load_key  = glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS;
         bool regen_key = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
 
         if(save_key && !last_save_key)
@@ -1780,8 +1692,8 @@ int main()
         if(regen_key && !last_regen_key)
             request_regen = true;
 
-        last_save_key = save_key;
-        last_load_key = load_key;
+        last_save_key  = save_key;
+        last_load_key  = load_key;
         last_regen_key = regen_key;
 
         float dx = (float)(mx - last_mx);
@@ -1885,10 +1797,10 @@ int main()
         }
 
         // Tiny Glade style: click to anchor, drag up/down to sculpt
-        bool mouse_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-        bool paint_active = false;
+        bool  mouse_down   = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+        bool  paint_active = false;
         float sculpt_delta = 0.0f;
-        
+
         // Update hover position for brush visualization
         if(sculpt_mode && !sculpt_dragging && !imgui_capture_mouse)
         {
@@ -1904,7 +1816,7 @@ int main()
                 brush_hover_valid = false;
             }
         }
-        
+
         if(sculpt_mode && mouse_down && !imgui_capture_mouse)
         {
             if(!sculpt_dragging)
@@ -1913,25 +1825,25 @@ int main()
                 vec2 anchor;
                 if(screen_to_world_xz_camera(&cam, (float)mx, (float)my, (float)w, (float)h, aspect, terrain_avg_height, anchor))
                 {
-                          if(anchor[0] >= terrain_map_min[0] - terrain_gui.brush_radius &&
-                              anchor[0] <= terrain_map_max[0] + terrain_gui.brush_radius &&
-                              anchor[1] >= terrain_map_min[1] - terrain_gui.brush_radius &&
-                              anchor[1] <= terrain_map_max[1] + terrain_gui.brush_radius)
+                    if(anchor[0] >= terrain_map_min[0] - terrain_gui.brush_radius
+                       && anchor[0] <= terrain_map_max[0] + terrain_gui.brush_radius
+                       && anchor[1] >= terrain_map_min[1] - terrain_gui.brush_radius
+                       && anchor[1] <= terrain_map_max[1] + terrain_gui.brush_radius)
                     {
-                        sculpt_dragging = true;
+                        sculpt_dragging     = true;
                         sculpt_anchor_xz[0] = anchor[0];
                         sculpt_anchor_xz[1] = anchor[1];
-                        sculpt_last_my = (float)my;
+                        sculpt_last_my      = (float)my;
                     }
                 }
             }
             else
             {
                 // Continue drag: compute vertical delta
-                float dy = (sculpt_last_my - (float)my);
+                float dy       = (sculpt_last_my - (float)my);
                 sculpt_last_my = (float)my;
-                sculpt_delta = dy * terrain_gui.brush_strength;
-                paint_active = (fabsf(sculpt_delta) > 0.001f);
+                sculpt_delta   = dy * terrain_gui.brush_strength;
+                paint_active   = (fabsf(sculpt_delta) > 0.001f);
             }
         }
         else
@@ -1945,11 +1857,11 @@ int main()
         if(request_load)
         {
             TerrainSaveHeader hdr = {0};
-            if(terrain_load_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool, heightmap_image,
-                                      &heightmap_layout, &hdr))
+            if(terrain_load_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool,
+                                      heightmap_image, &heightmap_layout, &hdr))
             {
-                terrain_gui.height_scale   = hdr.heightScale;
-                terrain_gui.freq           = hdr.freq;
+                terrain_gui.height_scale    = hdr.heightScale;
+                terrain_gui.freq            = hdr.freq;
                 terrain_gui.noise_offset[0] = hdr.noiseOffset[0];
                 terrain_gui.noise_offset[1] = hdr.noiseOffset[1];
                 printf("[TERRAIN] Loaded heightmap from %s\n", TERRAIN_SAVE_PATH);
@@ -1966,7 +1878,8 @@ int main()
             terrain_gui.noise_offset[0] = ((float)rand() / (float)RAND_MAX) * 1000.0f;
             terrain_gui.noise_offset[1] = ((float)rand() / (float)RAND_MAX) * 1000.0f;
             terrain_clear_heightmap(device, qf.graphics_queue, upload_pool, heightmap_image, &heightmap_layout);
-            printf("[TERRAIN] Procedural terrain regenerated (seed %.2f, %.2f)\n", terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]);
+            printf("[TERRAIN] Procedural terrain regenerated (seed %.2f, %.2f)\n", terrain_gui.noise_offset[0],
+                   terrain_gui.noise_offset[1]);
             request_regen = false;
         }
 
@@ -1984,8 +1897,8 @@ int main()
                 .freq        = terrain_gui.freq,
             };
 
-            if(terrain_save_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool, heightmap_image,
-                                      &heightmap_layout, &hdr))
+            if(terrain_save_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool,
+                                      heightmap_image, &heightmap_layout, &hdr))
             {
                 printf("[TERRAIN] Saved heightmap to %s\n", TERRAIN_SAVE_PATH);
             }
@@ -2114,23 +2027,23 @@ int main()
         render_instance_bind(cmd, &terrain_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
 
         // Determine brush display position + direction visualization
-        vec2 brush_display_xz = {0.0f, 0.0f};
+        vec2  brush_display_xz  = {0.0f, 0.0f};
         float brush_active_flag = 0.0f;
-        float brush_delta_vis = 0.0f;
+        float brush_delta_vis   = 0.0f;
         if(sculpt_mode)
         {
             if(sculpt_dragging)
             {
                 brush_display_xz[0] = sculpt_anchor_xz[0];
                 brush_display_xz[1] = sculpt_anchor_xz[1];
-                brush_active_flag = 1.0f;  // Actively sculpting
-                brush_delta_vis = fmaxf(-1.0f, fminf(1.0f, sculpt_delta * 0.1f));
+                brush_active_flag   = 1.0f;  // Actively sculpting
+                brush_delta_vis     = fmaxf(-1.0f, fminf(1.0f, sculpt_delta * 0.1f));
             }
             else if(brush_hover_valid)
             {
                 brush_display_xz[0] = brush_hover_xz[0];
                 brush_display_xz[1] = brush_hover_xz[1];
-                brush_active_flag = 0.5f;  // Hovering
+                brush_active_flag   = 0.5f;  // Hovering
             }
         }
 
@@ -2138,7 +2051,7 @@ int main()
             .time        = (float)glfwGetTime(),
             .heightScale = terrain_gui.height_scale,
             .freq        = terrain_gui.freq,
-            .worldScale  = 1.0f,   // leave 1 unless you want bigger terrain
+            .worldScale  = 1.0f,  // leave 1 unless you want bigger terrain
             .mapMin      = {terrain_map_min[0], terrain_map_min[1]},
             .mapMax      = {terrain_map_max[0], terrain_map_max[1]},
             .noiseOffset = {terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]},
@@ -2176,35 +2089,35 @@ int main()
         if(water_gui.enabled)
         {
             WaterPC wpc = {
-                .time         = (float)glfwGetTime(),
-                .heightScale  = terrain_gui.height_scale,
-                .freq         = terrain_gui.freq,
-                .waterHeight  = water_gui.water_height,
-                .mapMin       = {terrain_map_min[0], terrain_map_min[1]},
-                .mapMax       = {terrain_map_max[0], terrain_map_max[1]},
-                .noiseOffset  = {terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]},
-                .depthFade    = water_gui.depth_fade,
-                .foamDistance = water_gui.foam_distance,
-                .foamScale    = water_gui.foam_scale,
-                .foamSpeed    = water_gui.foam_speed,
-                .normalScale  = water_gui.normal_scale,
-                .specular     = water_gui.specular_enabled ? water_gui.specular : 0.0f,
-                .opacity      = water_gui.opacity,
-                .fresnelPower = water_gui.fresnel_power,
+                .time            = (float)glfwGetTime(),
+                .heightScale     = terrain_gui.height_scale,
+                .freq            = terrain_gui.freq,
+                .waterHeight     = water_gui.water_height,
+                .mapMin          = {terrain_map_min[0], terrain_map_min[1]},
+                .mapMax          = {terrain_map_max[0], terrain_map_max[1]},
+                .noiseOffset     = {terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]},
+                .depthFade       = water_gui.depth_fade,
+                .foamDistance    = water_gui.foam_distance,
+                .foamScale       = water_gui.foam_scale,
+                .foamSpeed       = water_gui.foam_speed,
+                .normalScale     = water_gui.normal_scale,
+                .specular        = water_gui.specular_enabled ? water_gui.specular : 0.0f,
+                .opacity         = water_gui.opacity,
+                .fresnelPower    = water_gui.fresnel_power,
                 .fresnelStrength = water_gui.fresnel_enabled ? water_gui.fresnel_strength : 0.0f,
-                .specPower    = water_gui.spec_power,
-                .pad0         = 0.0f,
+                .specPower       = water_gui.spec_power,
+                .pad0            = 0.0f,
                 .sunDirIntensity = {water_gui.sun_dir[0], water_gui.sun_dir[1], water_gui.sun_dir[2], water_gui.sun_intensity},
             };
 
-            vec3 sun_dir = {wpc.sunDirIntensity[0], wpc.sunDirIntensity[1], wpc.sunDirIntensity[2]};
+            vec3  sun_dir = {wpc.sunDirIntensity[0], wpc.sunDirIntensity[1], wpc.sunDirIntensity[2]};
             float sun_len = glm_vec3_norm(sun_dir);
             if(sun_len < 1e-3f)
             {
                 sun_dir[0] = 0.3f;
                 sun_dir[1] = 1.0f;
                 sun_dir[2] = 0.2f;
-                sun_len = glm_vec3_norm(sun_dir);
+                sun_len    = glm_vec3_norm(sun_dir);
             }
             glm_vec3_scale(sun_dir, 1.0f / sun_len, sun_dir);
             wpc.sunDirIntensity[0] = sun_dir[0];
@@ -2221,35 +2134,32 @@ int main()
 
         // Ensure terrain/water writes are visible to subsequent passes
         IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    .src_stage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    .dst_stage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    .src_access = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                    .dst_access = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .src_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                .dst_stage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                .src_access = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                .dst_access = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         IMAGE_BARRIER_IMMEDIATE(cmd, depth.image[current_frame], VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                    .src_stage  = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                    .dst_stage  = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-                    .src_access = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    .dst_access = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                              VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    .aspect     = VK_IMAGE_ASPECT_DEPTH_BIT);
+                                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, .src_stage = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                                .dst_stage  = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                                .src_access = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                .dst_access = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                .aspect = VK_IMAGE_ASPECT_DEPTH_BIT);
 
         // UI pass without depth to avoid depth-test conflicts
         VkRenderingAttachmentInfo color_attach_ui = color_attach;
-        color_attach_ui.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        color_attach_ui.loadOp                    = VK_ATTACHMENT_LOAD_OP_LOAD;
 
-        VkRenderingInfo rendering_ui = rendering;
+        VkRenderingInfo rendering_ui   = rendering;
         rendering_ui.pColorAttachments = &color_attach_ui;
         rendering_ui.pDepthAttachment  = NULL;
 
         VkRenderingAttachmentInfo color_attach_gfx = color_attach;
-        color_attach_gfx.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        color_attach_gfx.loadOp                    = VK_ATTACHMENT_LOAD_OP_LOAD;
 
         VkRenderingAttachmentInfo depth_attach_gfx = depth_attach;
-        depth_attach_gfx.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        depth_attach_gfx.loadOp                    = VK_ATTACHMENT_LOAD_OP_LOAD;
 
-        VkRenderingInfo rendering_gfx = rendering;
+        VkRenderingInfo rendering_gfx   = rendering;
         rendering_gfx.pColorAttachments = &color_attach_gfx;
         rendering_gfx.pDepthAttachment  = &depth_attach_gfx;
 
@@ -2260,12 +2170,11 @@ int main()
 
         // Ensure UI color writes are visible to the mesh pass
         IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    .src_stage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    .dst_stage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    .src_access = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                    .dst_access = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-	GPU_SCOPE(cmd, P, "cull", VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .src_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                .dst_stage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                .src_access = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                .dst_access = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        GPU_SCOPE(cmd, P, "cull", VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
         {
             vkCmdFillBuffer(cmd, draw_count_buffer.buffer, draw_count_buffer.offset, sizeof(uint32_t), 0);
             BUFFER_BARRIER_IMMEDIATE(cmd, draw_count_buffer.buffer, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -2291,17 +2200,17 @@ int main()
 
             ToonPC toon_pc = {
                 .light_dir_intensity = {toon_gui.light_dir[0], toon_gui.light_dir[1], toon_gui.light_dir[2], toon_gui.light_intensity},
-                .indirect_min_color  = {toon_gui.indirect_min_color[0], toon_gui.indirect_min_color[1], toon_gui.indirect_min_color[2],
-                                        toon_gui.indirect_multiplier},
-                .shadow_map_color    = {toon_gui.shadow_color[0], toon_gui.shadow_color[1], toon_gui.shadow_color[2], toon_gui.receive_shadow},
-                .outline_color       = {toon_gui.outline_color[0], toon_gui.outline_color[1], toon_gui.outline_color[2], 1.0f},
-                .params0             = {toon_gui.cel_mid, toon_gui.cel_soft, 0.0f, toon_gui.outline_z_offset},
-                .params1             = {toon_gui.use_alpha_clip ? 1.0f : 0.0f, toon_gui.cutoff,
-                                        toon_gui.use_emission ? 1.0f : 0.0f, toon_gui.emission_mul_by_base},
-                .params2             = {toon_gui.use_occlusion ? 1.0f : 0.0f, toon_gui.occlusion_strength,
-                                        toon_gui.occlusion_remap_start, toon_gui.occlusion_remap_end},
-                .params3             = {toon_gui.is_face ? 1.0f : 0.0f, toon_gui.outline_z_remap_start,
-                                        toon_gui.outline_z_remap_end, 0.0f},
+                .indirect_min_color = {toon_gui.indirect_min_color[0], toon_gui.indirect_min_color[1],
+                                       toon_gui.indirect_min_color[2], toon_gui.indirect_multiplier},
+                .shadow_map_color   = {toon_gui.shadow_color[0], toon_gui.shadow_color[1], toon_gui.shadow_color[2],
+                                       toon_gui.receive_shadow},
+                .outline_color = {toon_gui.outline_color[0], toon_gui.outline_color[1], toon_gui.outline_color[2], 1.0f},
+                .params0 = {toon_gui.cel_mid, toon_gui.cel_soft, 0.0f, toon_gui.outline_z_offset},
+                .params1 = {toon_gui.use_alpha_clip ? 1.0f : 0.0f, toon_gui.cutoff, toon_gui.use_emission ? 1.0f : 0.0f,
+                            toon_gui.emission_mul_by_base},
+                .params2 = {toon_gui.use_occlusion ? 1.0f : 0.0f, toon_gui.occlusion_strength,
+                            toon_gui.occlusion_remap_start, toon_gui.occlusion_remap_end},
+                .params3 = {toon_gui.is_face ? 1.0f : 0.0f, toon_gui.outline_z_remap_start, toon_gui.outline_z_remap_end, 0.0f},
             };
 
             vec3 light_dir = {toon_pc.light_dir_intensity[0], toon_pc.light_dir_intensity[1], toon_pc.light_dir_intensity[2]};
@@ -2320,23 +2229,15 @@ int main()
 
             vkCmdBindIndexBuffer(cmd, gpu_scene.index.buffer, 0, VK_INDEX_TYPE_UINT32);
 
-            render_draw_indirect_count(cmd,
-                                       indirect_buffer.buffer,
-                                       indirect_buffer.offset,
-                                       draw_count_buffer.buffer,
-                                       draw_count_buffer.offset,
-                                       draw_count);
+            render_draw_indirect_count(cmd, indirect_buffer.buffer, indirect_buffer.offset, draw_count_buffer.buffer,
+                                       draw_count_buffer.offset, draw_count);
 
             toon_pc.params0[2] = toon_gui.outline_width;
             render_instance_bind(cmd, &toon_outline_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
             render_instance_set_push_data(&toon_outline_inst, &toon_pc, sizeof(ToonPC));
             render_instance_push(cmd, &toon_outline_inst);
-            render_draw_indirect_count(cmd,
-                                       indirect_buffer.buffer,
-                                       indirect_buffer.offset,
-                                       draw_count_buffer.buffer,
-                                       draw_count_buffer.offset,
-                                       draw_count);
+            render_draw_indirect_count(cmd, indirect_buffer.buffer, indirect_buffer.offset, draw_count_buffer.buffer,
+                                       draw_count_buffer.offset, draw_count);
 
             vkCmdEndRendering(cmd);
         }
