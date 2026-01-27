@@ -42,13 +42,10 @@ layout(set = 0, binding = 1, std430) readonly buffer Draws
 
 struct VertexPacked
 {
-    uint16_t vx;
-    uint16_t vy;
-    uint16_t vz;
+    uint16_t vx,vy, vz;
     uint16_t tp;
     uint np;
-    uint16_t tu;
-    uint16_t tv;
+    uint16_t tu, tv;
 };
 
 layout(set = 0, binding = 2, std430) readonly buffer Vertices

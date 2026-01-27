@@ -81,6 +81,11 @@ vec3 heightmapNormal(vec2 xz)
     return N;
 }
 
+    const vec2 blade[6] = vec2[](
+        vec2(-0.5, 0.0), vec2( 0.5, 0.0), vec2(-0.08, 1.0),
+        vec2( 0.5, 0.0), vec2( 0.08, 1.0), vec2(-0.08, 1.0)
+    );
+
 void main()
 {
     uint id = uint(gl_InstanceIndex);
@@ -118,10 +123,6 @@ void main()
     vec3 side = normalize(cross(up, forward));
     vec3 bendDir = normalize(cross(side, up));
 
-    const vec2 blade[6] = vec2[](
-        vec2(-0.5, 0.0), vec2( 0.5, 0.0), vec2(-0.08, 1.0),
-        vec2( 0.5, 0.0), vec2( 0.08, 1.0), vec2(-0.08, 1.0)
-    );
 
     vec2 b = blade[gl_VertexIndex];
     vBladeT = b.y;
@@ -138,5 +139,5 @@ void main()
     vWorldNrm = normalize(mix(up, bendDir, 0.2));
     vRand = r0;
 
-    gl_Position = ubo.viewproj * vec4(pos, 0.0);
+    gl_Position = ubo.viewproj * vec4(pos, 1.0);
 }

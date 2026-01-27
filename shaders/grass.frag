@@ -33,55 +33,43 @@ layout(push_constant) uniform GrassPC {
     float pad0;
 } pc;
 
+
 void main()
 {
-    vec3 V = normalize(ubo.cameraPos.xyz - vWorldPos);
     vec3 N = normalize(vWorldNrm);
-    if(dot(N, V) < 0.0)
-        N = -N;
 
-    vec3 sunDir  = normalize(vec3(-0.45, 0.95, 0.25));
-    vec3 sunCol  = vec3(2.05, 0.98, 0.88);
-    vec3 fillDir = normalize(vec3(0.6, 0.25, -0.35));
-    vec3 fillCol = vec3(1.55, 0.71, 0.95);
+    // --------------------------------------------------------
+    // Blade gradient (base -> tip)
+    // --------------------------------------------------------
+    float tip = clamp(vBladeT, 0.0, 1.0);
+    tip = tip * tip * (3.0 - 2.0 * tip); // smoothstep without function call
 
-    float ndl = clamp(dot(N, sunDir), 0.0, 1.0);
-    float ndlFill = clamp(dot(N, fillDir), 0.0, 1.0);
-
-    float tip = pow(clamp(vBladeT, 0.0, 1.0), 1.25);
-
-    vec3 baseA = vec3(0.08, 3.26, 0.12);
-    vec3 baseB = vec3(0.14, 0.34, 2.16);
-    vec3 tipA  = vec3(0.22, 0.58, 0.28);
-    vec3 tipB  = vec3(0.32, 0.78, 0.34);
+    vec3 baseA = vec3(0.08, 0.32, 0.12); // dark green
+    vec3 baseB = vec3(0.12, 0.38, 0.18);
+    vec3 tipA  = vec3(0.28, 0.55, 0.22); // lighter tip
+    vec3 tipB  = vec3(0.32, 0.62, 0.26);
 
     vec3 baseCol = mix(baseA, baseB, vRand);
     vec3 tipCol  = mix(tipA,  tipB,  vRand);
     vec3 albedo  = mix(baseCol, tipCol, tip);
 
-    float wrap = 0.25;
-    float diff = clamp((ndl + wrap) / (1.0 + wrap), 0.0, 1.0);
+    // --------------------------------------------------------
+    // Hemisphere lighting (cheap + stable)
+    // --------------------------------------------------------
+    vec3 skyCol    = vec3(0.60, 0.70, 0.90);
+    vec3 groundCol = vec3(0.18, 0.20, 0.16);
 
-    float back = clamp(dot(-N, sunDir), 0.0, 1.0);
-    vec3 sss = albedo * back * 0.35;
+    float hemi = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 ambient = mix(groundCol, skyCol, hemi);
 
-    vec3 ambientSky    = vec3(0.55, 0.65, 0.85);
-    vec3 ambientGround = vec3(0.20, 0.20, 0.18);
-    float hemi         = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 ambientCol    = mix(ambientGround, ambientSky, hemi);
+    vec3 color = albedo * ambient;
 
-    vec3 ambient = albedo * mix(0.18, 0.45, hemi);
-    vec3 diffuse = albedo * diff * 1.15 * sunCol;
-    vec3 fill    = albedo * ndlFill * 0.35 * fillCol;
-
-    float rim = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 2.0);
-    vec3 rimLight = albedo * rim * 0.35;
-
-    vec3 col = ambient + diffuse + fill + rimLight + sss;
-
+    // --------------------------------------------------------
+    // Distance fog (soft, hides LOD crimes)
+    // --------------------------------------------------------
     float dist = length(ubo.cameraPos.xyz - vWorldPos);
     float fog = exp(-dist * 0.0025);
-    col = mix(ambientCol, col, fog);
+    color = mix(ambient * 0.9, color, fog);
 
-    outColor = vec4(col, 0.0);
+    outColor = vec4(color, 1.0);
 }
