@@ -21,7 +21,8 @@ static void create_depth_target(ResourceAllocator* allocator, DepthTarget* depth
     depth->height = height;
 
     VkImageCreateInfo imgInfo =
-        VK_IMAGE_DEFAULT_2D(width, height, format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        VK_IMAGE_DEFAULT_2D(width, height, format,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
     VmaAllocationCreateInfo allocInfo = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
 

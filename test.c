@@ -337,6 +337,18 @@ typedef struct ToonPC
     vec4 params3;              // x=isFace, y=outlineZOffsetRemapStart, z=outlineZOffsetRemapEnd, w=unused
 } ToonPC;
 
+typedef struct DOFPC
+{
+
+    float focal_distance;  // meters
+    float focal_length;    // meters (50mm = 0.05f)
+    float coc_scale;       // f^2 / (sensor_height * f_stop)
+    float max_coc_px;      // pixels
+    float z_near;          // camera near
+
+} DOFPC;
+
+
 static const Vertex TRIANGLE_VERTS[] = {
     {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
     {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
@@ -532,7 +544,7 @@ int main()
     vk_gui_init_state(&gui);
     VkFormat hdr_format = VK_FORMAT_R16G16B16A16_SFLOAT;
     vk_gui_imgui_init(window, ctx.instance, gpu, device, qf.graphics_family, qf.graphics_queue, imgui_pool,
-                      swap.image_count, swap.image_count, hdr_format, depth_format, swap.image_usage, upload_pool);
+                      swap.image_count, swap.image_count, swap.format, depth_format, swap.image_usage, upload_pool);
 
     // -------------------------------------------------------------
     // Procedural bindless textures
@@ -625,6 +637,7 @@ int main()
     RenderObject water_obj         = {0};
     RenderObject cull_obj          = {0};
     RenderObject terrain_paint_obj = {0};
+    RenderObject dof_obj           = {0};
     RenderObject tonemap_obj       = {0};
 
     RenderObjectInstance toon_inst          = {0};
@@ -636,6 +649,7 @@ int main()
     RenderObjectInstance cull_inst          = {0};
     RenderObjectInstance terrain_paint_inst = {0};
     RenderObjectInstance raymarch_inst      = {0};
+    RenderObjectInstance dof_inst           = {0};
     RenderObjectInstance tonemap_inst       = {0};
 
     RenderObjectSpec tri_spec          = render_object_spec_from_config(&cfg);
@@ -734,6 +748,19 @@ int main()
     render_object_set_external_set(&water_obj, "u_textures", bindless.set);
     render_instance_create(&water_ro_inst, &water_obj.pipeline, &water_obj.resources);
 
+    RenderObjectSpec dof_spec       = render_object_spec_from_config(&cfg);
+    dof_spec.vert_spv               = "compiledshaders/dof.vert.spv";
+    dof_spec.frag_spv               = "compiledshaders/dof.frag.spv";
+    dof_spec.color_attachment_count = 1;
+    dof_spec.color_formats          = &hdr_format;
+    dof_spec.depth_test             = VK_FALSE;
+    dof_spec.depth_write            = VK_FALSE;
+    dof_spec.blend_enable           = VK_FALSE;
+    dof_spec.per_frame_sets         = VK_TRUE;
+
+    render_object_create(&dof_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &dof_spec, MAX_FRAME_IN_FLIGHT);
+    render_instance_create(&dof_inst, &dof_obj.pipeline, &dof_obj.resources);
+
     RenderObjectSpec tonemap_spec       = render_object_spec_from_config(&cfg);
     tonemap_spec.vert_spv               = "compiledshaders/tonemap.vert.spv";
     tonemap_spec.frag_spv               = "compiledshaders/tonemap.frag.spv";
@@ -773,6 +800,9 @@ int main()
 
     // HDR color target for tone mapping
     Image hdr = {0};
+
+    // HDR color target for DOF output
+    Image hdr_dof = {0};
 
     VkSampler heightmap_sampler = VK_NULL_HANDLE;
 
@@ -863,6 +893,9 @@ int main()
 
     recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, hdr_width, hdr_height, &hdr);
     hdr.sampler = tonemap_sampler;
+
+    recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, hdr_width, hdr_height, &hdr_dof);
+    hdr_dof.sampler = tonemap_sampler;
 
     // Calculate terrain bounds early (needed for CPU bake)
     float terrain_half_init    = ((float)TERRAIN_GRID - 1.0f) * TERRAIN_CELL * 0.5f;
@@ -1326,9 +1359,18 @@ int main()
     };
     render_object_write_static(&raymarch_obj, raymarch_writes, (uint32_t)(sizeof(raymarch_writes) / sizeof(raymarch_writes[0])));
 
+    for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
+    {
+        RenderWrite dof_writes[] = {
+            RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+            RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        };
+        render_object_write_frame(&dof_obj, i, dof_writes, (uint32_t)(sizeof(dof_writes) / sizeof(dof_writes[0])));
+    }
+
 
     RenderWrite tonemap_writes[] = {
-        RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
     render_object_write_static(&tonemap_obj, tonemap_writes, 1);
 
@@ -1616,9 +1658,20 @@ int main()
             destroy_depth_target(&allocator, &depth);
             create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
             recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
-            hdr.sampler                         = tonemap_sampler;
+            hdr.sampler = tonemap_sampler;
+            recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr_dof);
+            hdr_dof.sampler = tonemap_sampler;
+            for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
+            {
+                RenderWrite dof_resize_writes[] = {
+                    RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                    RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                };
+                render_object_write_frame(&dof_obj, i, dof_resize_writes,
+                                          (uint32_t)(sizeof(dof_resize_writes) / sizeof(dof_resize_writes[0])));
+            }
             RenderWrite tonemap_resize_writes[] = {
-                RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
             };
             render_object_write_static(&tonemap_obj, tonemap_resize_writes, 1);
             vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
@@ -1777,9 +1830,21 @@ int main()
                 destroy_depth_target(&allocator, &depth);
                 create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
                 recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
-                hdr.sampler                         = tonemap_sampler;
+                hdr.sampler = tonemap_sampler;
+                recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width,
+                                    swap.extent.height, &hdr_dof);
+                hdr_dof.sampler = tonemap_sampler;
+                for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
+                {
+                    RenderWrite dof_resize_writes[] = {
+                        RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                        RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                    };
+                    render_object_write_frame(&dof_obj, i, dof_resize_writes,
+                                              (uint32_t)(sizeof(dof_resize_writes) / sizeof(dof_resize_writes[0])));
+                }
                 RenderWrite tonemap_resize_writes[] = {
-                    RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                    RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
                 };
                 render_object_write_static(&tonemap_obj, tonemap_resize_writes, 1);
                 vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
@@ -2118,6 +2183,59 @@ int main()
 
         image_transition(cmd, &hdr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+        IMAGE_BARRIER_IMMEDIATE(cmd, depth.image[current_frame], depth.layout[current_frame],
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .src_stage = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                                .dst_stage  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                .src_access = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                .dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, .aspect = VK_IMAGE_ASPECT_DEPTH_BIT);
+        depth.layout[current_frame] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        if(hdr_dof.state.layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            image_to_color(cmd, &hdr_dof);
+
+        // -------------------------------------------------
+        // DOF pass: HDR + Depth → HDR_DOF
+        // -------------------------------------------------
+        VkRenderingAttachmentInfo dof_color = {
+            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView   = hdr_dof.view,
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue  = {.color = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}}},
+        };
+
+        VkRenderingInfo dof_rendering = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                                         .renderArea = {.offset = {0, 0}, .extent = {swap.extent.width, swap.extent.height}},
+                                         .layerCount           = 1,
+                                         .colorAttachmentCount = 1,
+                                         .pColorAttachments    = &dof_color,
+                                         .pDepthAttachment     = NULL};
+
+        vk_cmd_set_viewport_scissor(cmd, swap.extent);
+        vkCmdBeginRendering(cmd, &dof_rendering);
+        GPU_SCOPE(cmd, P, "dof", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
+        {
+            render_instance_bind(cmd, &dof_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
+
+            DOFPC dof_pc = {
+
+                .focal_distance = 10.0f,  // meters: good for outdoor / terrain scenes
+                .focal_length   = 0.05f,  // 50mm: human-eye-ish, neutral perspective
+                .coc_scale      = 0.0f,   // computed, not hardcoded (see below)
+                .max_coc_px     = 8.0f,   // pixels: strong but not stupid
+                .z_near         = cam.znear,
+            };
+            render_instance_set_push_data(&dof_inst, &dof_pc, sizeof(dof_pc));
+            render_instance_push(cmd, &dof_inst);
+
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+        }
+        vkCmdEndRendering(cmd);
+
+        image_transition(cmd, &hdr_dof, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
         // -------------------------------------------------
         // Tone mapping pass: HDR → swapchain
         // -------------------------------------------------
@@ -2243,9 +2361,21 @@ int main()
                     create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
                 }
                 recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
-                hdr.sampler                         = tonemap_sampler;
+                hdr.sampler = tonemap_sampler;
+                recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width,
+                                    swap.extent.height, &hdr_dof);
+                hdr_dof.sampler = tonemap_sampler;
+                for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
+                {
+                    RenderWrite dof_resize_writes[] = {
+                        RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                        RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                    };
+                    render_object_write_frame(&dof_obj, i, dof_resize_writes,
+                                              (uint32_t)(sizeof(dof_resize_writes) / sizeof(dof_resize_writes[0])));
+                }
                 RenderWrite tonemap_resize_writes[] = {
-                    RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                    RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
                 };
                 render_object_write_static(&tonemap_obj, tonemap_resize_writes, 1);
                 vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
@@ -2309,6 +2439,10 @@ int main()
         vkDestroyImageView(device, hdr.view, NULL);
     if(hdr.image)
         res_destroy_image(&allocator, hdr.image, hdr.allocation);
+    if(hdr_dof.view)
+        vkDestroyImageView(device, hdr_dof.view, NULL);
+    if(hdr_dof.image)
+        res_destroy_image(&allocator, hdr_dof.image, hdr_dof.allocation);
     if(base_height.view)
         vkDestroyImageView(device, base_height.view, NULL);
     if(base_height.image)
@@ -2356,6 +2490,7 @@ int main()
     render_object_destroy(device, &water_obj);
     render_object_destroy(device, &cull_obj);
     render_object_destroy(device, &terrain_paint_obj);
+    render_object_destroy(device, &dof_obj);
     vkDestroySurfaceKHR(ctx.instance, surface, NULL);
     vkDestroyDevice(device, NULL);
 
