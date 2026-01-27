@@ -5,7 +5,6 @@
 #include <vulkan/vulkan_core.h>
 
 
-
 // buffer is a region of memory used to store vertex data, index data, uniform data, and other types of data.
 typedef struct Buffer
 {
@@ -28,7 +27,7 @@ typedef struct BufferSlice
 
 typedef struct BufferArena
 {
-    Buffer      buffer;
+    Buffer       buffer;
     OA_Allocator allocator;
     VkDeviceSize alignment;
 } BufferArena;
@@ -53,19 +52,52 @@ typedef struct GpuMeshBuffers
 // };
 //
 //
+// ImageState answers:
+//
+// “How is this image currently used?”
+//
+// ImageResource answers:
+//
+// “What memory and object back this image?”
 
-typedef struct Image
+
+#define MAX_IMAGES       1024
+#define MAX_IMAGE_VIEWS  8192
+
+typedef struct ImageState
 {
-    VkImage               image;
-    VkExtent3D            extent;
-    uint32_t              mipLevels;
-    uint32_t              arrayLayers;
-    VkFormat              format;
-    VmaAllocation         allocation;
-    VkDescriptorImageInfo descriptor;
-} Image;
+    VkImageLayout          layout;
+    VkPipelineStageFlags2 stage;
+    VkAccessFlags2        access;
+} ImageState;
 
 
+typedef struct ImageResource
+{
+    VkImage        image;
+    VkExtent3D     extent;
+    VkFormat       format;
+    uint16_t       mipLevels;
+    uint16_t       arrayLayers;
+
+    VmaAllocation allocation;
+
+    uint16_t       viewBase;   // index into global view pool
+    uint16_t       viewCount;  // how many views belong to this image
+} ImageResource;
+
+typedef struct ImageViewPool
+{
+    VkImageView views[MAX_IMAGE_VIEWS];
+    uint32_t    count;
+} ImageViewPool;
+// Views are just handles
+//
+// Handles are cheap
+//
+// Indirection via index is faster than pointer chasing
+//
+// Lifetime is explicit
 typedef struct ResourceAllocator
 {
     VkDevice         device;
@@ -107,25 +139,25 @@ void res_create_buffer(ResourceAllocator* ra,
 
 void res_destroy_buffer(ResourceAllocator* ra, Buffer* buf);
 
-void res_create_image(ResourceAllocator* ra,
+void res_create_image(ResourceAllocator*       ra,
                       const VkImageCreateInfo* image_info,
-                      VmaMemoryUsage            memory_usage,
-                      VmaAllocationCreateFlags  flags,
-                      VkImage*                  out_image,
-                      VmaAllocation*            out_alloc);
+                      VmaMemoryUsage           memory_usage,
+                      VmaAllocationCreateFlags flags,
+                      VkImage*                 out_image,
+                      VmaAllocation*           out_alloc);
 
 void res_destroy_image(ResourceAllocator* ra, VkImage image, VmaAllocation allocation);
 
-void buffer_arena_init(ResourceAllocator* ra,
-                       VkDeviceSize             size,
-                       VkBufferUsageFlags2KHR   usageflags,
-                       VmaMemoryUsage           memory_usage,
-                       VmaAllocationCreateFlags flags,
-                       VkDeviceSize             alignment,
-                       BufferArena*             out_arena);
-void buffer_arena_destroy(ResourceAllocator* ra, BufferArena* arena);
+void        buffer_arena_init(ResourceAllocator*       ra,
+                              VkDeviceSize             size,
+                              VkBufferUsageFlags2KHR   usageflags,
+                              VmaMemoryUsage           memory_usage,
+                              VmaAllocationCreateFlags flags,
+                              VkDeviceSize             alignment,
+                              BufferArena*             out_arena);
+void        buffer_arena_destroy(ResourceAllocator* ra, BufferArena* arena);
 BufferSlice buffer_arena_alloc(BufferArena* arena, VkDeviceSize size, VkDeviceSize alignment);
-void buffer_arena_free(BufferArena* arena, BufferSlice* slice);
+void        buffer_arena_free(BufferArena* arena, BufferSlice* slice);
 
 
 // NOTE: This is a simple version: it waits for the queue to finish (vkQueueWaitIdle).

@@ -31,7 +31,7 @@ void main()
 {
     uint texIndex = materials_buf.materials[in_materialIndex].textures.x;
 
-vec4 tex = texture(u_textures[nonuniformEXT(texIndex)], in_uv);
+    vec4 tex = texture(u_textures[nonuniformEXT(texIndex)], in_uv);
     vec4 diffuse = materials_buf.materials[in_materialIndex].diffuseFactor;
     vec3 n = normalize(in_normal) * 0.5 + 0.5;
     outColor = vec4(n, 1.0) * tex * diffuse;

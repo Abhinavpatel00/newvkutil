@@ -30,6 +30,72 @@
 #include "file_utils.h"
 #include "terrain.h"
 
+static void recreate_hdr_target(ResourceAllocator* allocator,
+                                VkDevice device,
+                                VkQueue queue,
+                                VkCommandPool upload_pool,
+                                uint32_t width,
+                                uint32_t height,
+                                VkImage* image,
+                                VkImageView* view,
+                                VmaAllocation* alloc,
+                                VkImageLayout* layout)
+{
+    if (*view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, *view, NULL);
+        *view = VK_NULL_HANDLE;
+    }
+    if (*image != VK_NULL_HANDLE) {
+        vmaDestroyImage(allocator->allocator, *image, *alloc);
+        *image = VK_NULL_HANDLE;
+        *alloc = NULL;
+    }
+
+    VkImageCreateInfo info = {
+        .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType   = VK_IMAGE_TYPE_2D,
+        .format      = VK_FORMAT_R16G16B16A16_SFLOAT,
+        .extent      = { width, height, 1 },
+        .mipLevels   = 1,
+        .arrayLayers = 1,
+        .samples     = VK_SAMPLE_COUNT_1_BIT,
+        .tiling      = VK_IMAGE_TILING_OPTIMAL,
+        .usage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    VmaAllocationCreateInfo alloc_info = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE
+    };
+
+    res_create_image(allocator, &info, alloc_info.usage, alloc_info.flags, image, alloc);
+
+    VkImageViewCreateInfo view_info = {
+        .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image    = *image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format   = VK_FORMAT_R16G16B16A16_SFLOAT,
+        .subresourceRange = {
+            .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel   = 0,
+            .levelCount     = 1,
+            .baseArrayLayer = 0,
+            .layerCount     = 1,
+        },
+    };
+
+    VK_CHECK(vkCreateImageView(device, &view_info, NULL, view));
+
+    VkCommandBuffer cmd = begin_one_time_cmd(device, upload_pool);
+    IMAGE_BARRIER_IMMEDIATE(cmd,
+        *image,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    end_one_time_cmd(device, queue, upload_pool, cmd);
+
+    *layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+}
 static bool g_framebuffer_resized = false;
 
 #define render_pc(cmd, obj, T, value_ptr) render_object_push_constants((cmd), (obj), (value_ptr), sizeof(T))
@@ -559,6 +625,7 @@ int main()
     RenderObject water_obj         = {0};
     RenderObject cull_obj          = {0};
     RenderObject terrain_paint_obj = {0};
+    RenderObject tonemap_obj       = {0};
 
     RenderObjectInstance toon_inst          = {0};
     RenderObjectInstance toon_outline_inst  = {0};
@@ -569,6 +636,7 @@ int main()
     RenderObjectInstance cull_inst          = {0};
     RenderObjectInstance terrain_paint_inst = {0};
     RenderObjectInstance raymarch_inst      = {0};
+    RenderObjectInstance tonemap_inst       = {0};
 
     RenderObjectSpec tri_spec          = render_object_spec_from_config(&cfg);
     tri_spec.vert_spv                  = "compiledshaders/tri.vert.spv";
@@ -643,11 +711,10 @@ int main()
     RenderObjectSpec grass_spec = terrain_spec;
     grass_spec.vert_spv         = "compiledshaders/grass.vert.spv";
     grass_spec.frag_spv         = "compiledshaders/grass.frag.spv";
-   grass_spec.cull_mode =VK_CULL_MODE_BACK_BIT; 
+    grass_spec.cull_mode        = VK_CULL_MODE_NONE;
     grass_spec.blend_enable     = VK_FALSE;
 
     render_object_create(&grass_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &grass_spec, 1);
-    render_object_enable_hot_reload(&grass_obj, VK_NULL_HANDLE, &grass_spec);
     render_instance_create(&grass_inst, &grass_obj.pipeline, &grass_obj.resources);
 
 
@@ -664,11 +731,16 @@ int main()
     water_spec.bindless_descriptor_count = bindless.max_textures;
 
     render_object_create(&water_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &water_spec, 1);
-    render_object_enable_hot_reload(&water_obj, VK_NULL_HANDLE, &water_spec);
     render_object_set_external_set(&water_obj, "u_textures", bindless.set);
     render_instance_create(&water_ro_inst, &water_obj.pipeline, &water_obj.resources);
 
+    RenderObjectSpec tonemap_spec = render_object_spec_from_config(&cfg);
+    tonemap_spec.vert_spv         = "compiledshaders/tonemap.vert.spv";
+    tonemap_spec.frag_spv         = "compiledshaders/tonemap.frag.spv";
 
+    render_object_create(&tonemap_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &tonemap_spec, 1);
+
+    render_instance_create(&tonemap_inst, &tonemap_obj.pipeline, &tonemap_obj.resources);
     BufferArena host_arena         = {0};
     BufferArena device_arena       = {0};
     BufferSlice global_ubo_buf     = {0};
@@ -702,9 +774,27 @@ int main()
     VkImageView   sculpt_delta_view   = VK_NULL_HANDLE;
     VmaAllocation sculpt_delta_alloc  = NULL;
     VkImageLayout sculpt_delta_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // HDR color target for tone mapping
+    VkImage       hdr_image  = VK_NULL_HANDLE;
+    VkImageView   hdr_view   = VK_NULL_HANDLE;
+    VmaAllocation hdr_alloc  = NULL;
+    VkImageLayout hdr_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkSampler heightmap_sampler = VK_NULL_HANDLE;
 
+    VkSampler tonemap_sampler;
+
+    VkSamplerCreateInfo samp = {
+        .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter    = VK_FILTER_LINEAR,
+        .minFilter    = VK_FILTER_LINEAR,
+        .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    };
+
+    vkCreateSampler(device, &samp, NULL, &tonemap_sampler);
     VkTerrainGuiParams terrain_gui = {
         .height_scale   = 20.0f,
         .freq           = 0.02f,
@@ -753,6 +843,26 @@ int main()
         .unnormalizedCoordinates = VK_FALSE,
     };
     VK_CHECK(vkCreateSampler(device, &sampler_info, NULL, &heightmap_sampler));
+
+    // ------------------------------------------------------------
+    // HDR color buffer (scene renders here)
+    // ------------------------------------------------------------
+
+uint32_t hdr_width  = 0;
+uint32_t hdr_height = 0;
+hdr_width  = swap.extent.width;
+hdr_height = swap.extent.height;
+
+recreate_hdr_target(&allocator,
+                    device,
+                    qf.graphics_queue,
+                    upload_pool,
+                    hdr_width,
+                    hdr_height,
+                    &hdr_image,
+                    &hdr_view,
+                    &hdr_alloc,
+                    &hdr_layout);
 
     // Calculate terrain bounds early (needed for CPU bake)
     float terrain_half_init    = ((float)TERRAIN_GRID - 1.0f) * TERRAIN_CELL * 0.5f;
@@ -842,10 +952,10 @@ int main()
 
     // Load grass.glb for instanced grass rendering
     Scene grass_scene = {0};
-//    if(!scene_load_gltf(&grass_scene, "/home/lk/vkutils/newestvkutil/asset/grass.glb"))
+    //    if(!scene_load_gltf(&grass_scene, "/home/lk/vkutils/newestvkutil/asset/grass.glb"))
     {
         printf("Failed to load grass.glb\n");
- //       return 1;
+        //       return 1;
     }
     printf("Loaded grass.glb with %u meshes, %u vertices, %u indices\n", (uint32_t)arrlen(grass_scene.geometry.meshes),
            (uint32_t)arrlen(grass_scene.geometry.vertices), (uint32_t)arrlen(grass_scene.geometry.indices));
@@ -1180,22 +1290,13 @@ int main()
     };
     render_object_write_static(&terrain_obj, terrain_writes, (uint32_t)(sizeof(terrain_writes) / sizeof(terrain_writes[0])));
 
-    // Grass descriptor writes (must happen AFTER grass mesh is uploaded)
-    if(grass_gpu_mesh.vertex.buffer != VK_NULL_HANDLE && arrlen(grass_scene.geometry.vertices) > 0)
-    {
-        VkDeviceSize grass_vb_size  = (VkDeviceSize)arrlen(grass_scene.geometry.vertices) * sizeof(VertexPacked);
-        RenderWrite  grass_writes[] = {
-            RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
-            RW_IMG("uBaseHeight", base_height_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-            RW_IMG("uSculptDelta", sculpt_delta_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-            RW_BUF("vb", grass_gpu_mesh.vertex.buffer, grass_vb_size),
-        };
-        render_object_write_static(&grass_obj, grass_writes, (uint32_t)(sizeof(grass_writes) / sizeof(grass_writes[0])));
-    }
-    else
-    {
-        printf("[WARN] Grass mesh not loaded, skipping descriptor writes\n");
-    }
+    // Grass descriptor writes (procedural blades need only heightmaps + UBO)
+    RenderWrite grass_writes[] = {
+        RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
+        RW_IMG("uBaseHeight", base_height_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uSculptDelta", sculpt_delta_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+    };
+    render_object_write_static(&grass_obj, grass_writes, (uint32_t)(sizeof(grass_writes) / sizeof(grass_writes[0])));
 
     RenderWrite water_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
@@ -1227,6 +1328,12 @@ int main()
     render_object_write_static(&raymarch_obj, raymarch_writes, (uint32_t)(sizeof(raymarch_writes) / sizeof(raymarch_writes[0])));
 
 
+    RenderWrite tonemap_writes[] = {
+        RW_IMG("uColor", hdr_view, tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+    };
+    render_object_write_static(&tonemap_obj, tonemap_writes, 1);
+
+
     Camera cam = {0};
     camera_init(&cam);
     // Start above the terrain so we're not under a strictly-positive heightfield.
@@ -1245,7 +1352,6 @@ int main()
     bool last_sculpt_toggle = false;
 
     // Sculpting brush parameters (Tiny Glade style)
-    float terrain_avg_height = 10.0f;  // Approximate average terrain height for picking
 
     VkGrassGuiParams grass_gui = {
         .blade_height  = 1.4f,
@@ -1524,8 +1630,12 @@ int main()
         // Update hover position for brush visualization
         if(sculpt_mode && !sculpt_dragging && !imgui_capture_mouse)
         {
-            vec2 hover_xz;
-            if(screen_to_world_xz_camera(&cam, (float)mx, (float)my, (float)w, (float)h, aspect, terrain_avg_height, hover_xz))
+            vec2  hover_xz;
+            float terrain_y_hint = terrain_gui.height_scale * 0.5f;
+            if(screen_to_world_xz_heightfield(&cam, (float)mx, (float)my, (float)w, (float)h, aspect, terrain_y_hint,
+                                              terrain_map_min[0], terrain_map_min[1], terrain_map_max[0],
+                                              terrain_map_max[1], terrain_gui.freq, terrain_gui.noise_offset[0],
+                                              terrain_gui.noise_offset[1], terrain_gui.height_scale, hover_xz))
             {
                 brush_hover_xz[0] = hover_xz[0];
                 brush_hover_xz[1] = hover_xz[1];
@@ -1542,8 +1652,12 @@ int main()
             if(!sculpt_dragging)
             {
                 // Start drag: pick anchor point
-                vec2 anchor;
-                if(screen_to_world_xz_camera(&cam, (float)mx, (float)my, (float)w, (float)h, aspect, terrain_avg_height, anchor))
+                vec2  anchor;
+                float terrain_y_hint = terrain_gui.height_scale * 0.5f;
+                if(screen_to_world_xz_heightfield(&cam, (float)mx, (float)my, (float)w, (float)h, aspect, terrain_y_hint,
+                                                  terrain_map_min[0], terrain_map_min[1], terrain_map_max[0],
+                                                  terrain_map_max[1], terrain_gui.freq, terrain_gui.noise_offset[0],
+                                                  terrain_gui.noise_offset[1], terrain_gui.height_scale, anchor))
                 {
                     if(anchor[0] >= terrain_map_min[0] - terrain_gui.brush_radius
                        && anchor[0] <= terrain_map_max[0] + terrain_gui.brush_radius
@@ -1725,7 +1839,7 @@ int main()
         }
 
         VkRenderingAttachmentInfo color_attach = {.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                                                  .imageView   = swap.image_views[image_index],
+                                                  .imageView   = hdr_view,
                                                   .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                                   .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
                                                   .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
@@ -1823,7 +1937,7 @@ int main()
             render_instance_set_push_data(&grass_inst, &gpc, sizeof(gpc));
             render_instance_push(cmd, &grass_inst);
             vkCmdDraw(cmd, 6, GRASS_INSTANCE_COUNT, 0, 0);
-	    // if(grass_gpu_mesh.index_count > 0)
+            // if(grass_gpu_mesh.index_count > 0)
             // {
             //     VkDeviceSize offsets[] = {0};
             //     vkCmdBindVertexBuffers(cmd, 0, 1, &grass_gpu_mesh.vertex.buffer, offsets);
@@ -2002,6 +2116,54 @@ int main()
         //         render_object_bind(cmd, &raymarch_obj, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
         //         vkCmdDraw(cmd, 3, 1, 0, 0);
         //         vkCmdEndRendering(cmd);
+
+
+        IMAGE_BARRIER_IMMEDIATE(cmd, hdr_image, hdr_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                .src_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                .dst_stage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, .src_access = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                .dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+        hdr_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        // -------------------------------------------------
+        // Tone mapping pass: HDR → swapchain
+        // -------------------------------------------------
+
+        // Transition swapchain for color output
+        IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+        VkRenderingAttachmentInfo tonemap_color = {
+            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView   = swap.image_views[image_index],
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+        };
+
+        VkRenderingInfo tonemap_rendering = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                                             .renderArea = {.offset = {0, 0}, .extent = {swap.extent.width, swap.extent.height}},
+                                             .layerCount           = 1,
+                                             .colorAttachmentCount = 1,
+                                             .pColorAttachments    = &tonemap_color,
+                                             .pDepthAttachment     = NULL};
+
+        vk_cmd_set_viewport_scissor(cmd, swap.extent);
+        vkCmdBeginRendering(cmd, &tonemap_rendering);
+
+        render_instance_bind(cmd, &tonemap_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
+
+        struct
+        {
+            float exposure;
+            float gamma;
+        } tonemap_pc = {.exposure = 1.0f, .gamma = 2.2f};
+
+        render_instance_set_push_data(&tonemap_inst, &tonemap_pc, sizeof(tonemap_pc));
+        render_instance_push(cmd, &tonemap_inst);
+
+        // fullscreen triangle
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+
+        vkCmdEndRendering(cmd);
         GPU_SCOPE(cmd, P, "debug_text", VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
         {
             vk_debug_text_begin_frame(&dbg);
@@ -2013,11 +2175,11 @@ int main()
             vk_debug_text_flush(&dbg, cmd, swap.images[image_index], image_index);
         }
 
-
+        IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, .src_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                .dst_stage  = VK_PIPELINE_STAGE_2_NONE,
+                                .src_access = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, .dst_access = 0);
         gpu_prof_end_frame(cmd, P);
-        IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-
-
         vk_cmd_end(cmd);
         VkSemaphoreSubmitInfo wait_info   = {.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
                                              .semaphore = frame_sync[current_frame].image_available_semaphore,

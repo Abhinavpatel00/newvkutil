@@ -108,7 +108,7 @@ void main()
     {
         float d = length(vWorldPos.xz - pc.brushXZ);
         float ring = abs(d - pc.brushRadius);
-        float ringMask = 1.0 - smoothstep(0.10, 0.0, ring);
+        float ringMask = 1.0 - smoothstep(0.0, 0.10, ring);
 
         vec3 hoverCol = vec3(6.3, 0.9, 1.0);
         vec3 upCol    = vec3(1.2, 1.0, 0.3);

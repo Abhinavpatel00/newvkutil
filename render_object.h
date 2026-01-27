@@ -126,11 +126,11 @@ typedef struct RenderObjectSpec
     VkCullModeFlags     cull_mode;
     VkFrontFace         front_face;
     VkCompareOp         depth_compare;
-    VkBool32            depth_test;
-    VkBool32            depth_write;
+    bool            depth_test;
+    bool            depth_write;
     VkPolygonMode       polygon_mode;
-    VkBool32            blend_enable;
-    VkBool32            use_vertex_input;
+    bool           blend_enable;
+    bool            use_vertex_input;
 
     // Dynamic rendering formats
     uint32_t        color_attachment_count;
@@ -139,11 +139,11 @@ typedef struct RenderObjectSpec
     VkFormat        stencil_format;
 
     // Descriptor behavior
-    VkBool32 allow_update_after_bind;
-    VkBool32 use_bindless_if_available;
-    VkBool32 per_frame_sets;
+    bool allow_update_after_bind;
+    bool use_bindless_if_available;
+    bool per_frame_sets;
     uint32_t bindless_descriptor_count;
-    VkBool32 reloadable;
+    bool reloadable;
 
     // Dynamic states (optional)
     uint32_t              dynamic_state_count;
@@ -168,7 +168,6 @@ static inline RenderObjectSpec render_object_spec_default(void)
         .polygon_mode           = VK_POLYGON_MODE_FILL,
         .blend_enable           = VK_TRUE,
         .use_vertex_input       = true,
-        .color_attachment_count = 1,
         .color_formats          = NULL,
         .depth_format           = VK_FORMAT_UNDEFINED,
         .stencil_format         = VK_FORMAT_UNDEFINED,

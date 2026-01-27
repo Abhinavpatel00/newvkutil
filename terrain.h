@@ -3,6 +3,7 @@
 #include "vk_cmd.h"
 #include "vk_resources.h"
 #include "camera.h"
+#include <math.h>
 
 static const char*    TERRAIN_SAVE_PATH    = "terrain_heightmap.bin";
 static const uint32_t TERRAIN_SAVE_MAGIC   = 0x54455252u;  // 'TERR'
@@ -480,6 +481,70 @@ static bool screen_to_world_xz_camera(const Camera* cam, float mx, float my, flo
 
     out_xz[0] = ro[0] + rd[0] * t;
     out_xz[1] = ro[2] + rd[2] * t;
+    return true;
+}
+
+static bool screen_to_world_xz_heightfield(const Camera* cam,
+                                           float         mx,
+                                           float         my,
+                                           float         width,
+                                           float         height,
+                                           float         aspect,
+                                           float         terrain_y_hint,
+                                           float         map_min_x,
+                                           float         map_min_y,
+                                           float         map_max_x,
+                                           float         map_max_y,
+                                           float         freq,
+                                           float         noise_offset_x,
+                                           float         noise_offset_y,
+                                           float         height_scale,
+                                           vec2          out_xz)
+{
+    if(width <= 0.0f || height <= 0.0f)
+        return false;
+
+    float ndc_x = (2.0f * mx / width) - 1.0f;
+    float ndc_y = 1.0f - (2.0f * my / height);
+
+    vec3 forward, right, up;
+    camera_get_basis((Camera*)cam, forward, right, up);
+
+    float tan_half_y = tanf(cam->fov_y * 0.5f);
+    float tan_half_x = tan_half_y * aspect;
+
+    vec3 rd = {forward[0], forward[1], forward[2]};
+    glm_vec3_muladds(right, ndc_x * tan_half_x, rd);
+    glm_vec3_muladds(up, ndc_y * tan_half_y, rd);
+    glm_vec3_normalize(rd);
+
+    vec3 ro = {cam->position[0], cam->position[1], cam->position[2]};
+
+    if(fabsf(rd[1]) < 1e-5f)
+        return false;
+
+    // Initial guess: intersect with a horizontal plane
+    float t = (terrain_y_hint - ro[1]) / rd[1];
+    if(t < 0.0f)
+        return false;
+
+    // Refine with a few iterations against procedural heightfield
+    for(int i = 0; i < 4; i++)
+    {
+        vec3 p = {ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t};
+        float h = cpu_terrain_height_procedural(p[0], p[2], freq, noise_offset_x, noise_offset_y, height_scale);
+        float t_new = (h - ro[1]) / rd[1];
+        if(!isfinite(t_new))
+            break;
+        t = t_new;
+    }
+
+    vec3 p = {ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t};
+    if(p[0] < map_min_x || p[0] > map_max_x || p[2] < map_min_y || p[2] > map_max_y)
+        return false;
+
+    out_xz[0] = p[0];
+    out_xz[1] = p[2];
     return true;
 }
 
