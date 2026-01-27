@@ -8,14 +8,8 @@
 
 typedef struct TextureResource
 {
-    VkImage     image;
-    VkImageView view;
-    VkSampler   sampler;
-
-    VmaAllocation allocation;
-
+    Image image;
     uint32_t width, height;
-    VkFormat format;
 
     // bindless slot index == TextureID
     uint32_t bindless_index;

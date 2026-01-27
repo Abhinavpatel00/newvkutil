@@ -3,6 +3,7 @@
 
 #include "vk_defaults.h"
 #include "vk_sync.h"
+#include <vulkan/vulkan_core.h>
 
 #define MAX_SWAPCHAIN_IMAGES 8
 

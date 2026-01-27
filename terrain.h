@@ -63,17 +63,16 @@ typedef struct TerrainPaintPC
     vec2  mapMax;
 } TerrainPaintPC;
 
-static void terrain_clear_heightmap(VkDevice device, VkQueue gfx_queue, VkCommandPool pool, VkImage image, VkImageLayout* inout_layout)
+static void terrain_clear_heightmap(VkDevice device, VkQueue gfx_queue, VkCommandPool pool, Image* image)
 {
     VkCommandBuffer cmd = begin_one_time_cmd(device, pool);
-    IMAGE_BARRIER_IMMEDIATE(cmd, image, *inout_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    image_to_transfer_dst(cmd, image);
     VkClearColorValue       clear_val   = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}};
     VkImageSubresourceRange clear_range = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
-    vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_val, 1, &clear_range);
-    IMAGE_BARRIER_IMMEDIATE(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkCmdClearColorImage(cmd, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_val, 1, &clear_range);
+    image_to_sampled(cmd, image);
     end_one_time_cmd(device, gfx_queue, pool, cmd);
-    *inout_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 static bool terrain_save_heightmap(const char*              path,
@@ -81,8 +80,7 @@ static bool terrain_save_heightmap(const char*              path,
                                    VkDevice                 device,
                                    VkQueue                  gfx_queue,
                                    VkCommandPool            pool,
-                                   VkImage                  image,
-                                   VkImageLayout*           inout_layout,
+                                   Image*                   image,
                                    const TerrainSaveHeader* header)
 {
     VkDeviceSize data_size = (VkDeviceSize)header->res * (VkDeviceSize)header->res * sizeof(uint16_t);
@@ -92,7 +90,7 @@ static bool terrain_save_heightmap(const char*              path,
                       VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, 0, &staging);
 
     VkCommandBuffer cmd = begin_one_time_cmd(device, pool);
-    IMAGE_BARRIER_IMMEDIATE(cmd, image, *inout_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    image_to_transfer_src(cmd, image);
 
     VkBufferImageCopy region = {
         .bufferOffset      = 0,
@@ -102,11 +100,10 @@ static bool terrain_save_heightmap(const char*              path,
         .imageOffset = {0, 0, 0},
         .imageExtent = {header->res, header->res, 1},
     };
-    vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer, 1, &region);
+    vkCmdCopyImageToBuffer(cmd, image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer, 1, &region);
 
-    IMAGE_BARRIER_IMMEDIATE(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    image_to_sampled(cmd, image);
     end_one_time_cmd(device, gfx_queue, pool, cmd);
-    *inout_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     FILE* f = fopen(path, "wb");
     if(!f)
@@ -129,8 +126,7 @@ static bool terrain_load_heightmap(const char*        path,
                                    VkDevice           device,
                                    VkQueue            gfx_queue,
                                    VkCommandPool      pool,
-                                   VkImage            image,
-                                   VkImageLayout*     inout_layout,
+                                   Image*             image,
                                    TerrainSaveHeader* out_header)
 {
     FILE* f = fopen(path, "rb");
@@ -164,7 +160,7 @@ static bool terrain_load_heightmap(const char*        path,
     fclose(f);
 
     VkCommandBuffer cmd = begin_one_time_cmd(device, pool);
-    IMAGE_BARRIER_IMMEDIATE(cmd, image, *inout_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    image_to_transfer_dst(cmd, image);
 
     VkBufferImageCopy region = {
         .bufferOffset      = 0,
@@ -174,11 +170,10 @@ static bool terrain_load_heightmap(const char*        path,
         .imageOffset = {0, 0, 0},
         .imageExtent = {out_header->res, out_header->res, 1},
     };
-    vkCmdCopyBufferToImage(cmd, staging.buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(cmd, staging.buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    IMAGE_BARRIER_IMMEDIATE(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    image_to_sampled(cmd, image);
     end_one_time_cmd(device, gfx_queue, pool, cmd);
-    *inout_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     res_destroy_buffer(allocator, &staging);
     return true;
@@ -358,8 +353,7 @@ static void terrain_bake_base_heightmap(ResourceAllocator* allocator,
                                         VkDevice           device,
                                         VkQueue            gfx_queue,
                                         VkCommandPool      pool,
-                                        VkImage            base_height_image,
-                                        VkImageLayout*     inout_layout,
+                                        Image*             base_height_image,
                                         uint32_t           res,
                                         float              map_min_x,
                                         float              map_min_y,
@@ -427,7 +421,7 @@ static void terrain_bake_base_heightmap(ResourceAllocator* allocator,
     printf("[TERRAIN] Base heightmap baked, uploading to GPU...\n");
 
     VkCommandBuffer cmd = begin_one_time_cmd(device, pool);
-    IMAGE_BARRIER_IMMEDIATE(cmd, base_height_image, *inout_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    image_to_transfer_dst(cmd, base_height_image);
 
     VkBufferImageCopy region = {
         .bufferOffset      = 0,
@@ -437,11 +431,10 @@ static void terrain_bake_base_heightmap(ResourceAllocator* allocator,
         .imageOffset = {0, 0, 0},
         .imageExtent = {res, res, 1},
     };
-    vkCmdCopyBufferToImage(cmd, staging.buffer, base_height_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(cmd, staging.buffer, base_height_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    IMAGE_BARRIER_IMMEDIATE(cmd, base_height_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    image_to_sampled(cmd, base_height_image);
     end_one_time_cmd(device, gfx_queue, pool, cmd);
-    *inout_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     res_destroy_buffer(allocator, &staging);
     printf("[TERRAIN] Base heightmap upload complete.\n");

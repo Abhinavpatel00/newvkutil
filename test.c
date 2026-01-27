@@ -31,70 +31,69 @@
 #include "terrain.h"
 
 static void recreate_hdr_target(ResourceAllocator* allocator,
-                                VkDevice device,
-                                VkQueue queue,
-                                VkCommandPool upload_pool,
-                                uint32_t width,
-                                uint32_t height,
-                                VkImage* image,
-                                VkImageView* view,
-                                VmaAllocation* alloc,
-                                VkImageLayout* layout)
+                                VkDevice           device,
+                                VkQueue            queue,
+                                VkCommandPool      upload_pool,
+                                uint32_t           width,
+                                uint32_t           height,
+                                Image*             image)
 {
-    if (*view != VK_NULL_HANDLE) {
-        vkDestroyImageView(device, *view, NULL);
-        *view = VK_NULL_HANDLE;
+    if(image->view != VK_NULL_HANDLE)
+    {
+        vkDestroyImageView(device, image->view, NULL);
+        image->view = VK_NULL_HANDLE;
     }
-    if (*image != VK_NULL_HANDLE) {
-        vmaDestroyImage(allocator->allocator, *image, *alloc);
-        *image = VK_NULL_HANDLE;
-        *alloc = NULL;
+    if(image->image != VK_NULL_HANDLE)
+    {
+        res_destroy_image(allocator, image->image, image->allocation);
+        image->image      = VK_NULL_HANDLE;
+        image->allocation = NULL;
     }
 
     VkImageCreateInfo info = {
-        .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .imageType   = VK_IMAGE_TYPE_2D,
-        .format      = VK_FORMAT_R16G16B16A16_SFLOAT,
-        .extent      = { width, height, 1 },
-        .mipLevels   = 1,
-        .arrayLayers = 1,
-        .samples     = VK_SAMPLE_COUNT_1_BIT,
-        .tiling      = VK_IMAGE_TILING_OPTIMAL,
-        .usage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType     = VK_IMAGE_TYPE_2D,
+        .format        = VK_FORMAT_R16G16B16A16_SFLOAT,
+        .extent        = {width, height, 1},
+        .mipLevels     = 1,
+        .arrayLayers   = 1,
+        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .tiling        = VK_IMAGE_TILING_OPTIMAL,
+        .usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
 
-    VmaAllocationCreateInfo alloc_info = {
-        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE
-    };
+    VmaAllocationCreateInfo alloc_info = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
 
-    res_create_image(allocator, &info, alloc_info.usage, alloc_info.flags, image, alloc);
+    res_create_image(allocator, &info, alloc_info.usage, alloc_info.flags, &image->image, &image->allocation);
+
+    image->extent      = info.extent;
+    image->format      = info.format;
+    image->mipLevels   = info.mipLevels;
+    image->arrayLayers = info.arrayLayers;
+    image_state_reset(image);
 
     VkImageViewCreateInfo view_info = {
         .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image    = *image,
+        .image    = image->image,
         .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format   = VK_FORMAT_R16G16B16A16_SFLOAT,
-        .subresourceRange = {
-            .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel   = 0,
-            .levelCount     = 1,
-            .baseArrayLayer = 0,
-            .layerCount     = 1,
-        },
+        .subresourceRange =
+            {
+                .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel   = 0,
+                .levelCount     = 1,
+                .baseArrayLayer = 0,
+                .layerCount     = 1,
+            },
     };
 
-    VK_CHECK(vkCreateImageView(device, &view_info, NULL, view));
+    VK_CHECK(vkCreateImageView(device, &view_info, NULL, &image->view));
 
     VkCommandBuffer cmd = begin_one_time_cmd(device, upload_pool);
-    IMAGE_BARRIER_IMMEDIATE(cmd,
-        *image,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    image_to_color(cmd, image);
     end_one_time_cmd(device, queue, upload_pool, cmd);
-
-    *layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 }
 static bool g_framebuffer_resized = false;
 
@@ -531,8 +530,9 @@ int main()
 
     VkGuiState gui = {0};
     vk_gui_init_state(&gui);
+    VkFormat hdr_format = VK_FORMAT_R16G16B16A16_SFLOAT;
     vk_gui_imgui_init(window, ctx.instance, gpu, device, qf.graphics_family, qf.graphics_queue, imgui_pool,
-                      swap.image_count, swap.image_count, swap.format, depth_format, swap.image_usage, upload_pool);
+                      swap.image_count, swap.image_count, hdr_format, depth_format, swap.image_usage, upload_pool);
 
     // -------------------------------------------------------------
     // Procedural bindless textures
@@ -609,7 +609,7 @@ int main()
 
     GraphicsPipelineConfig cfg = graphics_pipeline_config_default();
     cfg.color_attachment_count = 1;
-    cfg.color_formats          = &swap.format;
+    cfg.color_formats          = &hdr_format;
     cfg.depth_format           = depth_format;
 
     cfg.depth_test_enable  = true;
@@ -690,7 +690,7 @@ int main()
     raymarch_spec.front_face             = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     raymarch_spec.blend_enable           = VK_TRUE;
     raymarch_spec.color_attachment_count = 1;
-    raymarch_spec.color_formats          = &swap.format;
+    raymarch_spec.color_formats          = &hdr_format;
 
     render_object_create(&raymarch_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &raymarch_spec, 1);
     render_instance_create(&raymarch_inst, &raymarch_obj.pipeline, &raymarch_obj.resources);
@@ -734,9 +734,11 @@ int main()
     render_object_set_external_set(&water_obj, "u_textures", bindless.set);
     render_instance_create(&water_ro_inst, &water_obj.pipeline, &water_obj.resources);
 
-    RenderObjectSpec tonemap_spec = render_object_spec_from_config(&cfg);
-    tonemap_spec.vert_spv         = "compiledshaders/tonemap.vert.spv";
-    tonemap_spec.frag_spv         = "compiledshaders/tonemap.frag.spv";
+    RenderObjectSpec tonemap_spec       = render_object_spec_from_config(&cfg);
+    tonemap_spec.vert_spv               = "compiledshaders/tonemap.vert.spv";
+    tonemap_spec.frag_spv               = "compiledshaders/tonemap.frag.spv";
+    tonemap_spec.color_attachment_count = 1;
+    tonemap_spec.color_formats          = &swap.format;
 
     render_object_create(&tonemap_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &tonemap_spec, 1);
 
@@ -764,25 +766,17 @@ int main()
     water_instance_buf = buffer_arena_alloc(&host_arena, sizeof(WaterInstanceGpu), 256);
 
     // Base heightmap (immutable after CPU bake) - procedural terrain
-    VkImage       base_height_image  = VK_NULL_HANDLE;
-    VkImageView   base_height_view   = VK_NULL_HANDLE;
-    VmaAllocation base_height_alloc  = NULL;
-    VkImageLayout base_height_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    Image base_height = {0};
 
     // Sculpt delta (mutable via compute) - starts at 0, stores user edits
-    VkImage       sculpt_delta_image  = VK_NULL_HANDLE;
-    VkImageView   sculpt_delta_view   = VK_NULL_HANDLE;
-    VmaAllocation sculpt_delta_alloc  = NULL;
-    VkImageLayout sculpt_delta_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    Image sculpt_delta_img = {0};
+
     // HDR color target for tone mapping
-    VkImage       hdr_image  = VK_NULL_HANDLE;
-    VkImageView   hdr_view   = VK_NULL_HANDLE;
-    VmaAllocation hdr_alloc  = NULL;
-    VkImageLayout hdr_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    Image hdr = {0};
 
     VkSampler heightmap_sampler = VK_NULL_HANDLE;
 
-    VkSampler tonemap_sampler;
+    VkSampler tonemap_sampler = VK_NULL_HANDLE;
 
     VkSamplerCreateInfo samp = {
         .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -810,20 +804,32 @@ int main()
                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VmaAllocationCreateInfo heightmap_alloc_info = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     res_create_image(&allocator, &base_height_info, heightmap_alloc_info.usage, heightmap_alloc_info.flags,
-                     &base_height_image, &base_height_alloc);
+                     &base_height.image, &base_height.allocation);
 
-    VkImageViewCreateInfo base_height_view_info = VK_IMAGE_VIEW_DEFAULT(base_height_image, VK_FORMAT_R16_SFLOAT);
-    VK_CHECK(vkCreateImageView(device, &base_height_view_info, NULL, &base_height_view));
+    base_height.extent      = base_height_info.extent;
+    base_height.format      = base_height_info.format;
+    base_height.mipLevels   = base_height_info.mipLevels;
+    base_height.arrayLayers = base_height_info.arrayLayers;
+    image_state_reset(&base_height);
+
+    VkImageViewCreateInfo base_height_view_info = VK_IMAGE_VIEW_DEFAULT(base_height.image, VK_FORMAT_R16_SFLOAT);
+    VK_CHECK(vkCreateImageView(device, &base_height_view_info, NULL, &base_height.view));
 
     // Create sculpt delta texture (mutable via compute - needs STORAGE_BIT)
     VkImageCreateInfo sculpt_delta_info = VK_IMAGE_DEFAULT_2D(HEIGHTMAP_RES, HEIGHTMAP_RES, VK_FORMAT_R16_SFLOAT,
                                                               VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
                                                                   | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     res_create_image(&allocator, &sculpt_delta_info, heightmap_alloc_info.usage, heightmap_alloc_info.flags,
-                     &sculpt_delta_image, &sculpt_delta_alloc);
+                     &sculpt_delta_img.image, &sculpt_delta_img.allocation);
 
-    VkImageViewCreateInfo sculpt_delta_view_info = VK_IMAGE_VIEW_DEFAULT(sculpt_delta_image, VK_FORMAT_R16_SFLOAT);
-    VK_CHECK(vkCreateImageView(device, &sculpt_delta_view_info, NULL, &sculpt_delta_view));
+    sculpt_delta_img.extent      = sculpt_delta_info.extent;
+    sculpt_delta_img.format      = sculpt_delta_info.format;
+    sculpt_delta_img.mipLevels   = sculpt_delta_info.mipLevels;
+    sculpt_delta_img.arrayLayers = sculpt_delta_info.arrayLayers;
+    image_state_reset(&sculpt_delta_img);
+
+    VkImageViewCreateInfo sculpt_delta_view_info = VK_IMAGE_VIEW_DEFAULT(sculpt_delta_img.image, VK_FORMAT_R16_SFLOAT);
+    VK_CHECK(vkCreateImageView(device, &sculpt_delta_view_info, NULL, &sculpt_delta_img.view));
 
     VkSamplerCreateInfo sampler_info = {
         .sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -843,26 +849,20 @@ int main()
         .unnormalizedCoordinates = VK_FALSE,
     };
     VK_CHECK(vkCreateSampler(device, &sampler_info, NULL, &heightmap_sampler));
+    base_height.sampler      = heightmap_sampler;
+    sculpt_delta_img.sampler = heightmap_sampler;
 
     // ------------------------------------------------------------
     // HDR color buffer (scene renders here)
     // ------------------------------------------------------------
 
-uint32_t hdr_width  = 0;
-uint32_t hdr_height = 0;
-hdr_width  = swap.extent.width;
-hdr_height = swap.extent.height;
+    uint32_t hdr_width  = 0;
+    uint32_t hdr_height = 0;
+    hdr_width           = swap.extent.width;
+    hdr_height          = swap.extent.height;
 
-recreate_hdr_target(&allocator,
-                    device,
-                    qf.graphics_queue,
-                    upload_pool,
-                    hdr_width,
-                    hdr_height,
-                    &hdr_image,
-                    &hdr_view,
-                    &hdr_alloc,
-                    &hdr_layout);
+    recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, hdr_width, hdr_height, &hdr);
+    hdr.sampler = tonemap_sampler;
 
     // Calculate terrain bounds early (needed for CPU bake)
     float terrain_half_init    = ((float)TERRAIN_GRID - 1.0f) * TERRAIN_CELL * 0.5f;
@@ -870,7 +870,7 @@ recreate_hdr_target(&allocator,
     vec2  terrain_map_max_init = {terrain_half_init, terrain_half_init};
 
     // Clear sculpt delta to zero
-    terrain_clear_heightmap(device, qf.graphics_queue, upload_pool, sculpt_delta_image, &sculpt_delta_layout);
+    terrain_clear_heightmap(device, qf.graphics_queue, upload_pool, &sculpt_delta_img);
     printf("[TERRAIN] Sculpt delta cleared to zero\\n");
 
     // Load or bake base heightmap
@@ -878,8 +878,7 @@ recreate_hdr_target(&allocator,
     TerrainSaveHeader loaded_header    = {0};
     if(file_exists(TERRAIN_SAVE_PATH))
     {
-        if(terrain_load_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool,
-                                  sculpt_delta_image, &sculpt_delta_layout, &loaded_header))
+        if(terrain_load_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool, &sculpt_delta_img, &loaded_header))
         {
             terrain_gui.height_scale    = loaded_header.heightScale;
             terrain_gui.freq            = loaded_header.freq;
@@ -895,10 +894,10 @@ recreate_hdr_target(&allocator,
     }
 
     // Always bake base terrain from procedural noise on CPU (once at startup)
-    terrain_bake_base_heightmap(&allocator, device, qf.graphics_queue, upload_pool, base_height_image,
-                                &base_height_layout, HEIGHTMAP_RES, terrain_map_min_init[0], terrain_map_min_init[1],
-                                terrain_map_max_init[0], terrain_map_max_init[1], terrain_gui.freq,
-                                terrain_gui.noise_offset[0], terrain_gui.noise_offset[1], terrain_gui.height_scale);
+    terrain_bake_base_heightmap(&allocator, device, qf.graphics_queue, upload_pool, &base_height, HEIGHTMAP_RES,
+                                terrain_map_min_init[0], terrain_map_min_init[1], terrain_map_max_init[0],
+                                terrain_map_max_init[1], terrain_gui.freq, terrain_gui.noise_offset[0],
+                                terrain_gui.noise_offset[1], terrain_gui.height_scale);
 
     GpuProfiler prof[MAX_FRAME_IN_FLIGHT];
     float       cpu_frame_ms[MAX_FRAME_IN_FLIGHT] = {0};
@@ -1285,16 +1284,16 @@ recreate_hdr_target(&allocator,
 
     RenderWrite terrain_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
-        RW_IMG("uBaseHeight", base_height_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-        RW_IMG("uSculptDelta", sculpt_delta_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uBaseHeight", base_height.view, base_height.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uSculptDelta", sculpt_delta_img.view, sculpt_delta_img.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
     render_object_write_static(&terrain_obj, terrain_writes, (uint32_t)(sizeof(terrain_writes) / sizeof(terrain_writes[0])));
 
     // Grass descriptor writes (procedural blades need only heightmaps + UBO)
     RenderWrite grass_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
-        RW_IMG("uBaseHeight", base_height_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-        RW_IMG("uSculptDelta", sculpt_delta_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uBaseHeight", base_height.view, base_height.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uSculptDelta", sculpt_delta_img.view, sculpt_delta_img.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
     render_object_write_static(&grass_obj, grass_writes, (uint32_t)(sizeof(grass_writes) / sizeof(grass_writes[0])));
 
@@ -1317,7 +1316,7 @@ recreate_hdr_target(&allocator,
     render_object_write_static(&cull_obj, cull_writes, (uint32_t)(sizeof(cull_writes) / sizeof(cull_writes[0])));
 
     RenderWrite terrain_paint_writes[] = {
-        RW_IMG("sculptDelta", sculpt_delta_view, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL),
+        RW_IMG("sculptDelta", sculpt_delta_img.view, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL),
     };
     render_object_write_static(&terrain_paint_obj, terrain_paint_writes,
                                (uint32_t)(sizeof(terrain_paint_writes) / sizeof(terrain_paint_writes[0])));
@@ -1329,7 +1328,7 @@ recreate_hdr_target(&allocator,
 
 
     RenderWrite tonemap_writes[] = {
-        RW_IMG("uColor", hdr_view, tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
     render_object_write_static(&tonemap_obj, tonemap_writes, 1);
 
@@ -1616,6 +1615,12 @@ recreate_hdr_target(&allocator,
             ImGui_ImplVulkan_SetMinImageCount(swap.image_count);
             destroy_depth_target(&allocator, &depth);
             create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
+            recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
+            hdr.sampler                         = tonemap_sampler;
+            RenderWrite tonemap_resize_writes[] = {
+                RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+            };
+            render_object_write_static(&tonemap_obj, tonemap_resize_writes, 1);
             vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
             g_framebuffer_resized = false;
             igRender();
@@ -1691,8 +1696,7 @@ recreate_hdr_target(&allocator,
         if(request_load)
         {
             TerrainSaveHeader hdr = {0};
-            if(terrain_load_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool,
-                                      sculpt_delta_image, &sculpt_delta_layout, &hdr))
+            if(terrain_load_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool, &sculpt_delta_img, &hdr))
             {
                 terrain_gui.height_scale    = hdr.heightScale;
                 terrain_gui.freq            = hdr.freq;
@@ -1701,10 +1705,10 @@ recreate_hdr_target(&allocator,
                 printf("[TERRAIN] Loaded sculpt delta from %s\n", TERRAIN_SAVE_PATH);
 
                 // Re-bake base terrain with new parameters
-                terrain_bake_base_heightmap(&allocator, device, qf.graphics_queue, upload_pool, base_height_image,
-                                            &base_height_layout, HEIGHTMAP_RES, terrain_map_min[0], terrain_map_min[1],
-                                            terrain_map_max[0], terrain_map_max[1], terrain_gui.freq,
-                                            terrain_gui.noise_offset[0], terrain_gui.noise_offset[1], terrain_gui.height_scale);
+                terrain_bake_base_heightmap(&allocator, device, qf.graphics_queue, upload_pool, &base_height,
+                                            HEIGHTMAP_RES, terrain_map_min[0], terrain_map_min[1], terrain_map_max[0],
+                                            terrain_map_max[1], terrain_gui.freq, terrain_gui.noise_offset[0],
+                                            terrain_gui.noise_offset[1], terrain_gui.height_scale);
             }
             else
             {
@@ -1719,13 +1723,13 @@ recreate_hdr_target(&allocator,
             terrain_gui.noise_offset[1] = ((float)rand() / (float)RAND_MAX) * 1000.0f;
 
             // Clear sculpt delta
-            terrain_clear_heightmap(device, qf.graphics_queue, upload_pool, sculpt_delta_image, &sculpt_delta_layout);
+            terrain_clear_heightmap(device, qf.graphics_queue, upload_pool, &sculpt_delta_img);
 
             // Re-bake base terrain with new seed
-            terrain_bake_base_heightmap(&allocator, device, qf.graphics_queue, upload_pool, base_height_image,
-                                        &base_height_layout, HEIGHTMAP_RES, terrain_map_min[0], terrain_map_min[1],
-                                        terrain_map_max[0], terrain_map_max[1], terrain_gui.freq,
-                                        terrain_gui.noise_offset[0], terrain_gui.noise_offset[1], terrain_gui.height_scale);
+            terrain_bake_base_heightmap(&allocator, device, qf.graphics_queue, upload_pool, &base_height, HEIGHTMAP_RES,
+                                        terrain_map_min[0], terrain_map_min[1], terrain_map_max[0], terrain_map_max[1],
+                                        terrain_gui.freq, terrain_gui.noise_offset[0], terrain_gui.noise_offset[1],
+                                        terrain_gui.height_scale);
             printf("[TERRAIN] Procedural terrain regenerated (seed %.2f, %.2f)\n", terrain_gui.noise_offset[0],
                    terrain_gui.noise_offset[1]);
             request_regen = false;
@@ -1745,8 +1749,7 @@ recreate_hdr_target(&allocator,
                 .freq        = terrain_gui.freq,
             };
 
-            if(terrain_save_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool,
-                                      sculpt_delta_image, &sculpt_delta_layout, &hdr))
+            if(terrain_save_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool, &sculpt_delta_img, &hdr))
             {
                 printf("[TERRAIN] Saved sculpt delta to %s\n", TERRAIN_SAVE_PATH);
             }
@@ -1773,6 +1776,12 @@ recreate_hdr_target(&allocator,
                 ImGui_ImplVulkan_SetMinImageCount(swap.image_count);
                 destroy_depth_target(&allocator, &depth);
                 create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
+                recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
+                hdr.sampler                         = tonemap_sampler;
+                RenderWrite tonemap_resize_writes[] = {
+                    RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                };
+                render_object_write_static(&tonemap_obj, tonemap_resize_writes, 1);
                 vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
                 continue;
             }
@@ -1791,8 +1800,9 @@ recreate_hdr_target(&allocator,
         gpu_prof_begin_frame(cmd, P);
         /* transition for rendering target */
 
-        // Transition swapchain image for rendering
-        IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        // Transition HDR image for rendering
+        if(hdr.state.layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            image_to_color(cmd, &hdr);
 
         // Transition depth image for depth attachment usage
         IMAGE_BARRIER_IMMEDIATE(cmd, depth.image[current_frame], depth.layout[current_frame],
@@ -1803,11 +1813,8 @@ recreate_hdr_target(&allocator,
         {
             GPU_SCOPE(cmd, P, "terrain_paint", VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
             {
-                if(sculpt_delta_layout != VK_IMAGE_LAYOUT_GENERAL)
-                {
-                    IMAGE_BARRIER_IMMEDIATE(cmd, sculpt_delta_image, sculpt_delta_layout, VK_IMAGE_LAYOUT_GENERAL);
-                    sculpt_delta_layout = VK_IMAGE_LAYOUT_GENERAL;
-                }
+                if(sculpt_delta_img.state.layout != VK_IMAGE_LAYOUT_GENERAL)
+                    image_to_general_compute_rw(cmd, &sculpt_delta_img);
 
                 render_instance_bind(cmd, &terrain_paint_inst, VK_PIPELINE_BIND_POINT_COMPUTE, current_frame);
 
@@ -1828,18 +1835,16 @@ recreate_hdr_target(&allocator,
                 uint32_t group_y = (HEIGHTMAP_RES + 7u) / 8u;
                 vkCmdDispatch(cmd, group_x, group_y, 1);
 
-                IMAGE_BARRIER_IMMEDIATE(cmd, sculpt_delta_image, sculpt_delta_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                sculpt_delta_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                image_to_sampled(cmd, &sculpt_delta_img);
             }
         }
-        else if(sculpt_delta_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        else if(sculpt_delta_img.state.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
         {
-            IMAGE_BARRIER_IMMEDIATE(cmd, sculpt_delta_image, sculpt_delta_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            sculpt_delta_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            image_to_sampled(cmd, &sculpt_delta_img);
         }
 
         VkRenderingAttachmentInfo color_attach = {.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                                                  .imageView   = hdr_view,
+                                                  .imageView   = hdr.view,
                                                   .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                                   .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
                                                   .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
@@ -2118,12 +2123,8 @@ recreate_hdr_target(&allocator,
         //         vkCmdEndRendering(cmd);
 
 
-        IMAGE_BARRIER_IMMEDIATE(cmd, hdr_image, hdr_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                .src_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                .dst_stage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, .src_access = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                                .dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-
-        hdr_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        image_transition(cmd, &hdr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
         // -------------------------------------------------
         // Tone mapping pass: HDR → swapchain
         // -------------------------------------------------
@@ -2177,7 +2178,7 @@ recreate_hdr_target(&allocator,
 
         IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, .src_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                .dst_stage  = VK_PIPELINE_STAGE_2_NONE,
+                                .dst_stage  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
                                 .src_access = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, .dst_access = 0);
         gpu_prof_end_frame(cmd, P);
         vk_cmd_end(cmd);
@@ -2189,7 +2190,7 @@ recreate_hdr_target(&allocator,
             .sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
             .semaphore = swap.render_finished[image_index],
             .value     = 0,
-            .stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+            .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
         };
 
         VkCommandBufferSubmitInfo cmdInfo = {.sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO_KHR,
@@ -2222,6 +2223,12 @@ recreate_hdr_target(&allocator,
                     destroy_depth_target(&allocator, &depth);
                     create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
                 }
+                recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
+                hdr.sampler                         = tonemap_sampler;
+                RenderWrite tonemap_resize_writes[] = {
+                    RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                };
+                render_object_write_static(&tonemap_obj, tonemap_resize_writes, 1);
                 vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
 
                 continue;
@@ -2247,8 +2254,7 @@ recreate_hdr_target(&allocator,
         .freq        = terrain_gui.freq,
     };
     // Save sculpt delta (not base terrain - that gets re-baked from params)
-    terrain_save_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool, sculpt_delta_image,
-                           &sculpt_delta_layout, &autosave_hdr);
+    terrain_save_heightmap(TERRAIN_SAVE_PATH, &allocator, device, qf.graphics_queue, upload_pool, &sculpt_delta_img, &autosave_hdr);
 
 
     vk_gui_imgui_shutdown();
@@ -2278,14 +2284,20 @@ recreate_hdr_target(&allocator,
 
     if(heightmap_sampler)
         vkDestroySampler(device, heightmap_sampler, NULL);
-    if(base_height_view)
-        vkDestroyImageView(device, base_height_view, NULL);
-    if(base_height_image)
-        res_destroy_image(&allocator, base_height_image, base_height_alloc);
-    if(sculpt_delta_view)
-        vkDestroyImageView(device, sculpt_delta_view, NULL);
-    if(sculpt_delta_image)
-        res_destroy_image(&allocator, sculpt_delta_image, sculpt_delta_alloc);
+    if(tonemap_sampler)
+        vkDestroySampler(device, tonemap_sampler, NULL);
+    if(hdr.view)
+        vkDestroyImageView(device, hdr.view, NULL);
+    if(hdr.image)
+        res_destroy_image(&allocator, hdr.image, hdr.allocation);
+    if(base_height.view)
+        vkDestroyImageView(device, base_height.view, NULL);
+    if(base_height.image)
+        res_destroy_image(&allocator, base_height.image, base_height.allocation);
+    if(sculpt_delta_img.view)
+        vkDestroyImageView(device, sculpt_delta_img.view, NULL);
+    if(sculpt_delta_img.image)
+        res_destroy_image(&allocator, sculpt_delta_img.image, sculpt_delta_img.allocation);
 
     destroy_depth_target(&allocator, &depth);
 

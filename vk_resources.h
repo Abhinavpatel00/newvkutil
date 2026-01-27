@@ -71,6 +71,120 @@ typedef struct ImageState
     VkAccessFlags2        access;
 } ImageState;
 
+typedef struct Image
+{
+    VkImage        image;
+    VkExtent3D     extent;
+    VkFormat       format;
+    uint32_t       mipLevels;
+    uint32_t       arrayLayers;
+    VmaAllocation  allocation;
+
+    VkImageView    view;
+    VkSampler      sampler;
+
+    ImageState     state;
+} Image;
+
+static inline void image_state_reset(Image* img)
+{
+    if(!img)
+        return;
+    img->state.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    img->state.stage  = VK_PIPELINE_STAGE_2_NONE;
+    img->state.access = 0;
+}
+
+static inline VkDescriptorImageInfo image_descriptor(const Image* img)
+{
+    return (VkDescriptorImageInfo){
+        .imageView   = img->view,
+        .sampler     = img->sampler,
+        .imageLayout = img->state.layout,
+    };
+}
+
+static inline void image_transition(VkCommandBuffer cmd,
+                                    Image*          img,
+                                    VkImageLayout   newLayout,
+                                    VkPipelineStageFlags2 dstStage,
+                                    VkAccessFlags2  dstAccess)
+{
+    if(!img)
+        return;
+
+    if(img->state.layout == newLayout)
+        return;
+
+    VkImageMemoryBarrier2 barrier = {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .oldLayout     = img->state.layout,
+        .newLayout     = newLayout,
+        .srcStageMask  = img->state.stage,
+        .srcAccessMask = img->state.access,
+        .dstStageMask  = dstStage,
+        .dstAccessMask = dstAccess,
+        .image         = img->image,
+        .subresourceRange = {
+            .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+            .levelCount     = VK_REMAINING_MIP_LEVELS,
+            .layerCount     = VK_REMAINING_ARRAY_LAYERS,
+        },
+    };
+
+    VkDependencyInfo dep = {
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &barrier,
+    };
+
+    vkCmdPipelineBarrier2(cmd, &dep);
+
+    img->state.layout = newLayout;
+    img->state.stage  = dstStage;
+    img->state.access = dstAccess;
+}
+
+static inline void image_to_color(VkCommandBuffer cmd, Image* img)
+{
+    image_transition(cmd, img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+}
+
+static inline void image_to_sampled(VkCommandBuffer cmd, Image* img)
+{
+    image_transition(cmd, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+}
+
+static inline void image_to_present(VkCommandBuffer cmd, Image* img)
+{
+    image_transition(cmd, img, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_NONE, 0);
+}
+
+static inline void image_to_transfer_dst(VkCommandBuffer cmd, Image* img)
+{
+    image_transition(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT);
+}
+
+static inline void image_to_transfer_src(VkCommandBuffer cmd, Image* img)
+{
+    image_transition(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     VK_ACCESS_2_TRANSFER_READ_BIT);
+}
+
+static inline void image_to_general_compute_rw(VkCommandBuffer cmd, Image* img)
+{
+    image_transition(cmd, img, VK_IMAGE_LAYOUT_GENERAL,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+}
+
 
 typedef struct ImageResource
 {

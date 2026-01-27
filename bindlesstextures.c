@@ -38,7 +38,7 @@ static bool resolve_slot(BindlessTextures* bt, uint32_t slot_hint, uint32_t* out
     if(slot_hint >= bt->max_textures)
         return false;
 
-    if(bt->textures[slot_hint].image != VK_NULL_HANDLE)
+    if(bt->textures[slot_hint].image.image != VK_NULL_HANDLE)
         return false;
 
     *out_slot = slot_hint;
@@ -59,9 +59,9 @@ static void write_dummy_if_available(BindlessTextures* bt, VkDevice device, uint
     if(!bt || slot >= bt->max_textures)
         return;
 
-    if(bt->textures[0].view && bt->textures[0].sampler)
+    if(bt->textures[0].image.view && bt->textures[0].image.sampler)
     {
-        bindless_textures_write(bt, device, slot, bt->textures[0].view, bt->textures[0].sampler,
+        bindless_textures_write(bt, device, slot, bt->textures[0].image.view, bt->textures[0].image.sampler,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 }
@@ -96,7 +96,7 @@ void bindless_textures_destroy(BindlessTextures* bt, ResourceAllocator* allocato
 
     for(uint32_t i = 0; i < bt->max_textures; i++)
     {
-        if(bt->textures[i].image)
+        if(bt->textures[i].image.image)
             bindless_textures_destroy_texture(allocator, device, &bt->textures[i]);
     }
 
@@ -265,11 +265,17 @@ bool bindless_textures_create_rgba8(ResourceAllocator* allocator,
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
     };
 
-    res_create_image(allocator, &img_info, alloc_info.usage, alloc_info.flags, &out_tex->image, &out_tex->allocation);
+    res_create_image(allocator, &img_info, alloc_info.usage, alloc_info.flags, &out_tex->image.image, &out_tex->image.allocation);
+
+    out_tex->image.extent      = img_info.extent;
+    out_tex->image.format      = img_info.format;
+    out_tex->image.mipLevels   = img_info.mipLevels;
+    out_tex->image.arrayLayers = img_info.arrayLayers;
+    image_state_reset(&out_tex->image);
 
     VkImageViewCreateInfo view_info = {
         .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image    = out_tex->image,
+        .image    = out_tex->image.image,
         .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format   = VK_FORMAT_R8G8B8A8_UNORM,
         .subresourceRange =
@@ -282,7 +288,7 @@ bool bindless_textures_create_rgba8(ResourceAllocator* allocator,
             },
     };
 
-    VK_CHECK(vkCreateImageView(device, &view_info, NULL, &out_tex->view));
+    VK_CHECK(vkCreateImageView(device, &view_info, NULL, &out_tex->image.view));
 
 
     VkPhysicalDeviceProperties props;
@@ -313,7 +319,7 @@ bool bindless_textures_create_rgba8(ResourceAllocator* allocator,
         .unnormalizedCoordinates = VK_FALSE,
     };
 
-    VK_CHECK(vkCreateSampler(device, &sampler_info, NULL, &out_tex->sampler));
+    VK_CHECK(vkCreateSampler(device, &sampler_info, NULL, &out_tex->image.sampler));
     Buffer staging = {0};
     res_create_buffer(allocator, size, VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO,
                       VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, 0, &staging);
@@ -321,7 +327,7 @@ bool bindless_textures_create_rgba8(ResourceAllocator* allocator,
     memcpy(staging.mapping, pixels, (size_t)size);
 
     VkCommandBuffer cmd = begin_one_time_cmd(device, pool);
-    IMAGE_BARRIER_IMMEDIATE(cmd, out_tex->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    image_to_transfer_dst(cmd, &out_tex->image);
 
     VkBufferImageCopy region = {
         .bufferOffset      = 0,
@@ -338,27 +344,29 @@ bool bindless_textures_create_rgba8(ResourceAllocator* allocator,
         .imageExtent = {w, h, 1},
     };
 
-    vkCmdCopyBufferToImage(cmd, staging.buffer, out_tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(cmd, staging.buffer, out_tex->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    cmd_generate_mips(cmd, out_tex->image, w, h, mipCount);
+    cmd_generate_mips(cmd, out_tex->image.image, w, h, mipCount);
     end_one_time_cmd(device, queue, pool, cmd);
 
     res_destroy_buffer(allocator, &staging);
 
     out_tex->width  = w;
     out_tex->height = h;
-    out_tex->format = VK_FORMAT_R8G8B8A8_UNORM;
+    out_tex->image.state.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    out_tex->image.state.stage  = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    out_tex->image.state.access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     return true;
 }
 
 void bindless_textures_destroy_texture(ResourceAllocator* allocator, VkDevice device, TextureResource* tex)
 {
-    if(tex->sampler)
-        vkDestroySampler(device, tex->sampler, NULL);
-    if(tex->view)
-        vkDestroyImageView(device, tex->view, NULL);
-    if(tex->image)
-        vmaDestroyImage(allocator->allocator, tex->image, tex->allocation);
+    if(tex->image.sampler)
+        vkDestroySampler(device, tex->image.sampler, NULL);
+    if(tex->image.view)
+        vkDestroyImageView(device, tex->image.view, NULL);
+    if(tex->image.image)
+        res_destroy_image(allocator, tex->image.image, tex->image.allocation);
 
     *tex = (TextureResource){0};
 }
@@ -391,7 +399,7 @@ bool tex_create_from_rgba8_cpu(BindlessTextures* bindless,
 
     tex.bindless_index         = slot;
     bindless->textures[slot]   = tex;
-    bindless_textures_write(bindless, device, slot, tex.view, tex.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    bindless_textures_write(bindless, device, slot, tex.image.view, tex.image.sampler, tex.image.state.layout);
     *out_slot = slot;
     return true;
 }
@@ -424,7 +432,7 @@ bool tex_destroy(BindlessTextures* bindless, ResourceAllocator* allocator, VkDev
     if(!bindless || slot >= bindless->max_textures)
         return false;
 
-    if(bindless->textures[slot].image == VK_NULL_HANDLE)
+    if(bindless->textures[slot].image.image == VK_NULL_HANDLE)
         return false;
 
     bindless_textures_destroy_texture(allocator, device, &bindless->textures[slot]);
