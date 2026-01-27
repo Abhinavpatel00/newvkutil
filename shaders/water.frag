@@ -108,13 +108,17 @@ void main()
     // ------------------------------------------------------------
     // Foam (decorative, cheap)
     // ------------------------------------------------------------
-    float foam = texture(
-        u_textures[nonuniformEXT(mat.textures.y)],
-        vUV * mat.params0.y + N.xy * 0.1 + pc.time * 0.05
-    ).r;
+    float foam = 0.0;
+    if(pc.foamStrength > 0.001)
+    {
+        foam = texture(
+            u_textures[nonuniformEXT(mat.textures.y)],
+            vUV * mat.params0.y + N.xy * 0.1 + pc.time * 0.05
+        ).r;
 
-    foam = smoothstep(0.6, 0.9, foam) * pc.foamStrength;
-    color = mix(color, mat.foamColor.rgb, foam);
+        foam = smoothstep(0.6, 0.9, foam) * pc.foamStrength;
+        color = mix(color, mat.foamColor.rgb, foam);
+    }
 
     // ------------------------------------------------------------
     // Alpha (simple & stable)

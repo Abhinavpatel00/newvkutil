@@ -663,10 +663,11 @@ int main()
     RenderObjectSpec water_spec = render_object_spec_from_config(&cfg);
     water_spec.vert_spv         = "compiledshaders/water.vert.spv";
     water_spec.frag_spv         = "compiledshaders/water.frag.spv";
-    water_spec.depth_write               = VK_TRUE;
+    water_spec.depth_write               = VK_FALSE;
     water_spec.depth_test                = VK_TRUE;
     water_spec.blend_enable              = VK_TRUE;
     water_spec.use_vertex_input          = VK_TRUE;
+    water_spec.cull_mode                  = VK_CULL_MODE_BACK_BIT;
     water_spec.allow_update_after_bind   = VK_TRUE;
     water_spec.use_bindless_if_available = VK_TRUE;
     water_spec.bindless_descriptor_count = bindless.max_textures;
