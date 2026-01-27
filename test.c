@@ -45,6 +45,62 @@ static void           framebuffer_resize_callback(GLFWwindow* window, int width,
 }
 
 
+typedef struct WaterVertex
+{
+    float pos[3];
+    float uv[2];
+} WaterVertex;
+static void water_generate_grid(uint32_t grid, float size, WaterVertex** out_verts, uint32_t* out_vcount, uint32_t** out_inds, uint32_t* out_icount)
+{
+    uint32_t vcount = (grid + 1) * (grid + 1);
+    uint32_t icount = grid * grid * 6;
+
+    WaterVertex* verts = malloc(sizeof(WaterVertex) * vcount);
+    uint32_t*    inds  = malloc(sizeof(uint32_t) * icount);
+
+    uint32_t v = 0;
+    for(uint32_t y = 0; y <= grid; y++)
+    {
+        for(uint32_t x = 0; x <= grid; x++)
+        {
+            float fx = ((float)x / grid - 0.5f) * size;
+            float fy = ((float)y / grid - 0.5f) * size;
+
+            verts[v].pos[0] = fx;
+            verts[v].pos[1] = 0.0f;
+            verts[v].pos[2] = fy;
+
+            verts[v].uv[0] = (float)x / grid;
+            verts[v].uv[1] = (float)y / grid;
+            v++;
+        }
+    }
+
+    uint32_t i = 0;
+    for(uint32_t y = 0; y < grid; y++)
+    {
+        for(uint32_t x = 0; x < grid; x++)
+        {
+            uint32_t i0 = y * (grid + 1) + x;
+            uint32_t i1 = i0 + 1;
+            uint32_t i2 = i0 + (grid + 1);
+            uint32_t i3 = i2 + 1;
+
+            inds[i++] = i0;
+            inds[i++] = i2;
+            inds[i++] = i1;
+
+            inds[i++] = i1;
+            inds[i++] = i2;
+            inds[i++] = i3;
+        }
+    }
+
+    *out_verts  = verts;
+    *out_inds   = inds;
+    *out_vcount = vcount;
+    *out_icount = icount;
+}
 static inline void render_draw_indexed_mesh(VkCommandBuffer cmd, const GpuMeshBuffers* mesh)
 {
     VkDeviceSize offsets[] = {0};
@@ -186,27 +242,22 @@ typedef struct WaterInstanceGpu
     uint32_t pad2;
 } WaterInstanceGpu;
 
+
 typedef struct WaterPC
 {
     float time;
-    float heightScale;
-    float freq;
-    float waterHeight;
-    vec2  mapMin;
-    vec2  mapMax;
-    vec2  noiseOffset;
-    float depthFade;
-    float foamDistance;
-    float foamScale;
-    float foamSpeed;
-    float normalScale;
-    float specular;
     float opacity;
+
+    float normalScale;
+    float foamStrength;
+
+    float specular;
     float fresnelPower;
     float fresnelStrength;
+
     float specPower;
-    float pad0;
-    vec4  sunDirIntensity;
+    float pad;  // alignment padding
+    float sunDirIntensity[4];
 } WaterPC;
 
 typedef struct ToonPC
@@ -469,23 +520,20 @@ int main()
 
     stbi_set_flip_vertically_on_load(1);
     if(!tex_create_from_file_rgba8(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
-                                   "unity-stylized-water/Assets/Stylized Water/Textures/SmallWaves.TGA", TEX_SLOT_AUTO, &water_normal_slot))
+                                   "watertextures/SmallWaves.TGA", TEX_SLOT_AUTO, &water_normal_slot))
     {
-        printf("[WATER] Failed to load texture: %s\n", "unity-stylized-water/Assets/Stylized Water/Textures/SmallWaves.TGA");
         water_normal_slot = checker_slot;
     }
 
     if(!tex_create_from_file_rgba8(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
-                                   "unity-stylized-water/Assets/Stylized Water/Textures/Seafoam.TGA", TEX_SLOT_AUTO, &water_foam_slot))
+                                   "watertextures/Seafoam.TGA", TEX_SLOT_AUTO, &water_foam_slot))
     {
-        printf("[WATER] Failed to load texture: %s\n", "unity-stylized-water/Assets/Stylized Water/Textures/Seafoam.TGA");
         water_foam_slot = gradient_slot;
     }
 
     if(!tex_create_from_file_rgba8(&bindless, &allocator, device, qf.graphics_queue, upload_pool,
-                                   "unity-stylized-water/Assets/Stylized Water/Textures/SeaPattern.TGA", TEX_SLOT_AUTO, &water_noise_slot))
+                                   "watertextures/SeaPattern.TGA", TEX_SLOT_AUTO, &water_noise_slot))
     {
-        printf("[WATER] Failed to load texture: %s\n", "unity-stylized-water/Assets/Stylized Water/Textures/SeaPattern.TGA");
         water_noise_slot = checker_slot;
     }
 
@@ -612,10 +660,12 @@ int main()
     render_instance_create(&grass_inst, &grass_obj.pipeline, &grass_obj.resources);
 
 
-    RenderObjectSpec water_spec          = render_object_spec_from_config(&cfg);
-    water_spec.vert_spv                  = "compiledshaders/water.vert.spv";
-    water_spec.frag_spv                  = "compiledshaders/water.frag.spv";
-    water_spec.depth_write               = VK_FALSE;
+    RenderObjectSpec water_spec = render_object_spec_from_config(&cfg);
+    water_spec.vert_spv         = "compiledshaders/water.vert.spv";
+    water_spec.frag_spv         = "compiledshaders/water.frag.spv";
+    water_spec.depth_write               = VK_TRUE;
+    water_spec.depth_test                = VK_TRUE;
+    water_spec.blend_enable              = VK_TRUE;
     water_spec.use_vertex_input          = VK_TRUE;
     water_spec.allow_update_after_bind   = VK_TRUE;
     water_spec.use_bindless_if_available = VK_TRUE;
@@ -626,7 +676,7 @@ int main()
     render_object_set_external_set(&water_obj, "u_textures", bindless.set);
     render_instance_create(&water_ro_inst, &water_obj.pipeline, &water_obj.resources);
 
-   
+
     BufferArena host_arena         = {0};
     BufferArena device_arena       = {0};
     BufferSlice global_ubo_buf     = {0};
@@ -903,6 +953,34 @@ int main()
     gpu_scene.vertex_count = (uint32_t)arrlen(scene.geometry.vertices);
     gpu_scene.index_count  = (uint32_t)arrlen(scene.geometry.indices);
 
+    GpuMeshBuffers water_gpu = {0};
+
+    {
+        WaterVertex* wverts = NULL;
+        uint32_t*    winds  = NULL;
+        uint32_t     wvc = 0, wic = 0;
+
+        water_generate_grid(64,      // grid resolution (LOW)
+                            512.0f,  // world size (big plane)
+                            &wverts, &wvc, &winds, &wic);
+
+        res_create_buffer(&allocator, sizeof(WaterVertex) * wvc, VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, 0, &water_gpu.vertex);
+
+        res_create_buffer(&allocator, sizeof(uint32_t) * wic, VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, 0, &water_gpu.index);
+
+        upload_to_gpu_buffer(&allocator, qf.graphics_queue, upload_pool, water_gpu.vertex.buffer, 0, wverts,
+                             sizeof(WaterVertex) * wvc);
+
+        upload_to_gpu_buffer(&allocator, qf.graphics_queue, upload_pool, water_gpu.index.buffer, 0, winds, sizeof(uint32_t) * wic);
+
+        water_gpu.vertex_count = wvc;
+        water_gpu.index_count  = wic;
+
+        free(wverts);
+        free(winds);
+    }
 
     if(arrlen(scene.geometry.meshes) == 0)
     {
@@ -1086,8 +1164,6 @@ int main()
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
         RW_BUF_O("mat_buf", water_material_buf.buffer, water_material_buf.offset, sizeof(WaterMaterialGpu)),
         RW_BUF_O("inst_buf", water_instance_buf.buffer, water_instance_buf.offset, sizeof(WaterInstanceGpu)),
-        RW_IMG("uBaseHeight", base_height_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-        RW_IMG("uSculptDelta", sculpt_delta_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
     render_object_write_static(&water_obj, water_writes, (uint32_t)(sizeof(water_writes) / sizeof(water_writes[0])));
 
@@ -1714,28 +1790,22 @@ int main()
 
         if(water_gui.enabled)
         {
+
+
             WaterPC wpc = {
-                .time            = (float)glfwGetTime(),
-                .heightScale     = terrain_gui.height_scale,
-                .freq            = terrain_gui.freq,
-                .waterHeight     = water_gui.water_height,
-                .mapMin          = {terrain_map_min[0], terrain_map_min[1]},
-                .mapMax          = {terrain_map_max[0], terrain_map_max[1]},
-                .noiseOffset     = {terrain_gui.noise_offset[0], terrain_gui.noise_offset[1]},
-                .depthFade       = water_gui.depth_fade,
-                .foamDistance    = water_gui.foam_distance,
-                .foamScale       = water_gui.foam_scale,
-                .foamSpeed       = water_gui.foam_speed,
-                .normalScale     = water_gui.normal_scale,
+                .time    = (float)glfwGetTime(),
+                .opacity = water_gui.opacity,
+
+                .normalScale  = water_gui.normal_scale,
+                .foamStrength = water_gui.foam_enabled ? water_gui.foam_strength : 0.0f,
+
                 .specular        = water_gui.specular_enabled ? water_gui.specular : 0.0f,
-                .opacity         = water_gui.opacity,
                 .fresnelPower    = water_gui.fresnel_power,
                 .fresnelStrength = water_gui.fresnel_enabled ? water_gui.fresnel_strength : 0.0f,
-                .specPower       = water_gui.spec_power,
-                .pad0            = 0.0f,
+
+                .specPower = water_gui.spec_power,
                 .sunDirIntensity = {water_gui.sun_dir[0], water_gui.sun_dir[1], water_gui.sun_dir[2], water_gui.sun_intensity},
             };
-
             vec3  sun_dir = {wpc.sunDirIntensity[0], wpc.sunDirIntensity[1], wpc.sunDirIntensity[2]};
             float sun_len = glm_vec3_norm(sun_dir);
             if(sun_len < 1e-3f)
@@ -1756,7 +1826,8 @@ int main()
                 render_instance_bind(cmd, &water_ro_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
                 render_instance_set_push_data(&water_ro_inst, &wpc, sizeof(wpc));
                 render_instance_push(cmd, &water_ro_inst);
-                render_draw_indexed_mesh(cmd, &terrain_gpu);
+
+                render_draw_indexed_mesh(cmd, &water_gpu);
             }
         }
 
