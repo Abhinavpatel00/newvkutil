@@ -399,7 +399,7 @@ int main()
         .instance_layer_count        = 0,
         .instance_extension_count    = glfw_ext_count,
         .device_extension_count      = 1,
-        .enable_gpu_based_validation = true,
+        .enable_gpu_based_validation = false,
         .enable_validation           = true,
 
         .validation_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT
@@ -2027,13 +2027,6 @@ int main()
         rendering_gfx.pColorAttachments = &color_attach_gfx;
         rendering_gfx.pDepthAttachment  = &depth_attach_gfx;
 
-        GPU_SCOPE(cmd, P, "ui", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
-        {
-            vk_cmd_set_viewport_scissor(cmd, swap.extent);
-            vkCmdBeginRendering(cmd, &rendering_ui);
-            vk_gui_imgui_render(&gui, cmd);
-            vkCmdEndRendering(cmd);
-        }
 
         // Ensure UI color writes are visible to the mesh pass
         IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2165,6 +2158,32 @@ int main()
         vkCmdDraw(cmd, 3, 1, 0, 0);
 
         vkCmdEndRendering(cmd);
+
+        VkRenderingAttachmentInfo imgui_color = {
+
+            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView   = swap.image_views[image_index],
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+        };
+
+        VkRenderingInfo imgui_rendering = {
+
+            .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .layerCount           = 1,
+            .renderArea           = {0, 0, swap.extent.width, swap.extent.height},
+            .colorAttachmentCount = 1,
+            .pColorAttachments    = &imgui_color,
+        };
+        GPU_SCOPE(cmd, P, "ui", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
+        {
+
+            vk_cmd_set_viewport_scissor(cmd, swap.extent);
+            vkCmdBeginRendering(cmd, &imgui_rendering);
+            vk_gui_imgui_render(&gui, cmd);
+            vkCmdEndRendering(cmd);
+        }
         GPU_SCOPE(cmd, P, "debug_text", VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
         {
             vk_debug_text_begin_frame(&dbg);
