@@ -593,7 +593,8 @@ int main()
     render_object_create(&toon_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &toon_spec, 1);
     render_object_set_external_set(&toon_obj, "u_textures", bindless.set);
     render_instance_create(&toon_inst, &toon_obj.pipeline, &toon_obj.resources);
-
+    //
+    // Front-face culling is used for toon outlines so the expanded “silhouette” pass only draws backfaces, preventing z-fighting with the main surface and keeping the outline visible around edges. If you want the outline to wrap the model, you typically render backfaces and offset/expand in the vertex shader; culling front faces ensures only the outer shell shows.
     RenderObjectSpec toon_outline_spec = toon_spec;
     toon_outline_spec.frag_spv         = "compiledshaders/toon_outline.frag.spv";
     toon_outline_spec.depth_write      = VK_FALSE;
@@ -618,19 +619,10 @@ int main()
     RenderObjectSpec raymarch_spec       = render_object_spec_default();
     raymarch_spec.vert_spv               = "compiledshaders/fullscreen.vert.spv";
     raymarch_spec.frag_spv               = "compiledshaders/fullscreen.frag.spv";
-    raymarch_spec.topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    raymarch_spec.cull_mode              = VK_CULL_MODE_NONE;
     raymarch_spec.front_face             = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    raymarch_spec.depth_compare          = VK_COMPARE_OP_GREATER_OR_EQUAL;
-    raymarch_spec.depth_test             = VK_FALSE;
-    raymarch_spec.depth_write            = VK_FALSE;
-    raymarch_spec.polygon_mode           = VK_POLYGON_MODE_FILL;
     raymarch_spec.blend_enable           = VK_TRUE;
-    raymarch_spec.use_vertex_input       = VK_FALSE;
     raymarch_spec.color_attachment_count = 1;
     raymarch_spec.color_formats          = &swap.format;
-    raymarch_spec.depth_format           = VK_FORMAT_UNDEFINED;
-    raymarch_spec.stencil_format         = VK_FORMAT_UNDEFINED;
 
     render_object_create(&raymarch_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &raymarch_spec, 1);
     render_instance_create(&raymarch_inst, &raymarch_obj.pipeline, &raymarch_obj.resources);
@@ -651,8 +643,7 @@ int main()
     RenderObjectSpec grass_spec = terrain_spec;
     grass_spec.vert_spv         = "compiledshaders/grass.vert.spv";
     grass_spec.frag_spv         = "compiledshaders/grass.frag.spv";
-    grass_spec.use_vertex_input = VK_FALSE;
-    grass_spec.cull_mode        = VK_CULL_MODE_NONE;
+   grass_spec.cull_mode =VK_CULL_MODE_BACK_BIT; 
     grass_spec.blend_enable     = VK_FALSE;
 
     render_object_create(&grass_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &grass_spec, 1);
@@ -660,14 +651,14 @@ int main()
     render_instance_create(&grass_inst, &grass_obj.pipeline, &grass_obj.resources);
 
 
-    RenderObjectSpec water_spec = render_object_spec_from_config(&cfg);
-    water_spec.vert_spv         = "compiledshaders/water.vert.spv";
-    water_spec.frag_spv         = "compiledshaders/water.frag.spv";
+    RenderObjectSpec water_spec          = render_object_spec_from_config(&cfg);
+    water_spec.vert_spv                  = "compiledshaders/water.vert.spv";
+    water_spec.frag_spv                  = "compiledshaders/water.frag.spv";
     water_spec.depth_write               = VK_FALSE;
     water_spec.depth_test                = VK_TRUE;
     water_spec.blend_enable              = VK_TRUE;
     water_spec.use_vertex_input          = VK_TRUE;
-    water_spec.cull_mode                  = VK_CULL_MODE_BACK_BIT;
+    water_spec.cull_mode                 = VK_CULL_MODE_BACK_BIT;
     water_spec.allow_update_after_bind   = VK_TRUE;
     water_spec.use_bindless_if_available = VK_TRUE;
     water_spec.bindless_descriptor_count = bindless.max_textures;
@@ -849,6 +840,16 @@ int main()
         printf("Loaded: %s at (%.2f %.2f %.2f)\n", entries[i].label, entries[i].pos[0], entries[i].pos[1], entries[i].pos[2]);
     }
 
+    // Load grass.glb for instanced grass rendering
+    Scene grass_scene = {0};
+//    if(!scene_load_gltf(&grass_scene, "/home/lk/vkutils/newestvkutil/asset/grass.glb"))
+    {
+        printf("Failed to load grass.glb\n");
+ //       return 1;
+    }
+    printf("Loaded grass.glb with %u meshes, %u vertices, %u indices\n", (uint32_t)arrlen(grass_scene.geometry.meshes),
+           (uint32_t)arrlen(grass_scene.geometry.vertices), (uint32_t)arrlen(grass_scene.geometry.indices));
+
     uint32_t  texture_count = (uint32_t)arrlen(scene.texturePaths);
     uint32_t* texture_slots = NULL;
     if(texture_count > 0)
@@ -981,6 +982,31 @@ int main()
 
         free(wverts);
         free(winds);
+    }
+
+    // Upload grass mesh to GPU
+    GpuMeshBuffers grass_gpu_mesh = {0};
+    if(arrlen(grass_scene.geometry.vertices) > 0 && arrlen(grass_scene.geometry.indices) > 0)
+    {
+        VkDeviceSize grass_vb_size = (VkDeviceSize)arrlen(grass_scene.geometry.vertices) * sizeof(VertexPacked);
+        VkDeviceSize grass_ib_size = (VkDeviceSize)arrlen(grass_scene.geometry.indices) * sizeof(uint32_t);
+
+        res_create_buffer(&allocator, grass_vb_size,
+                          VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, 0, &grass_gpu_mesh.vertex);
+
+        res_create_buffer(&allocator, grass_ib_size, VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                          VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, 0, &grass_gpu_mesh.index);
+
+        upload_to_gpu_buffer(&allocator, qf.graphics_queue, upload_pool, grass_gpu_mesh.vertex.buffer, 0,
+                             grass_scene.geometry.vertices, grass_vb_size);
+
+        upload_to_gpu_buffer(&allocator, qf.graphics_queue, upload_pool, grass_gpu_mesh.index.buffer, 0,
+                             grass_scene.geometry.indices, grass_ib_size);
+
+        grass_gpu_mesh.vertex_count = (uint32_t)arrlen(grass_scene.geometry.vertices);
+        grass_gpu_mesh.index_count  = (uint32_t)arrlen(grass_scene.geometry.indices);
+        printf("Grass mesh uploaded: %u verts, %u indices\n", grass_gpu_mesh.vertex_count, grass_gpu_mesh.index_count);
     }
 
     if(arrlen(scene.geometry.meshes) == 0)
@@ -1154,12 +1180,22 @@ int main()
     };
     render_object_write_static(&terrain_obj, terrain_writes, (uint32_t)(sizeof(terrain_writes) / sizeof(terrain_writes[0])));
 
-    RenderWrite grass_writes[] = {
-        RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
-        RW_IMG("uBaseHeight", base_height_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-        RW_IMG("uSculptDelta", sculpt_delta_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-    };
-    render_object_write_static(&grass_obj, grass_writes, (uint32_t)(sizeof(grass_writes) / sizeof(grass_writes[0])));
+    // Grass descriptor writes (must happen AFTER grass mesh is uploaded)
+    if(grass_gpu_mesh.vertex.buffer != VK_NULL_HANDLE && arrlen(grass_scene.geometry.vertices) > 0)
+    {
+        VkDeviceSize grass_vb_size  = (VkDeviceSize)arrlen(grass_scene.geometry.vertices) * sizeof(VertexPacked);
+        RenderWrite  grass_writes[] = {
+            RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
+            RW_IMG("uBaseHeight", base_height_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+            RW_IMG("uSculptDelta", sculpt_delta_view, heightmap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+            RW_BUF("vb", grass_gpu_mesh.vertex.buffer, grass_vb_size),
+        };
+        render_object_write_static(&grass_obj, grass_writes, (uint32_t)(sizeof(grass_writes) / sizeof(grass_writes[0])));
+    }
+    else
+    {
+        printf("[WARN] Grass mesh not loaded, skipping descriptor writes\n");
+    }
 
     RenderWrite water_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
@@ -1787,6 +1823,13 @@ int main()
             render_instance_set_push_data(&grass_inst, &gpc, sizeof(gpc));
             render_instance_push(cmd, &grass_inst);
             vkCmdDraw(cmd, 6, GRASS_INSTANCE_COUNT, 0, 0);
+	    // if(grass_gpu_mesh.index_count > 0)
+            // {
+            //     VkDeviceSize offsets[] = {0};
+            //     vkCmdBindVertexBuffers(cmd, 0, 1, &grass_gpu_mesh.vertex.buffer, offsets);
+            //     vkCmdBindIndexBuffer(cmd, grass_gpu_mesh.index.buffer, 0, VK_INDEX_TYPE_UINT32);
+            //     vkCmdDrawIndexed(cmd, grass_gpu_mesh.index_count, GRASS_INSTANCE_COUNT, 0, 0, 0);
+            // }
         }
 
         if(water_gui.enabled)
@@ -2066,6 +2109,10 @@ int main()
     res_destroy_buffer(&allocator, &gpu_scene.vertex);
     res_destroy_buffer(&allocator, &terrain_gpu.index);
     res_destroy_buffer(&allocator, &terrain_gpu.vertex);
+    if(grass_gpu_mesh.vertex.buffer)
+        res_destroy_buffer(&allocator, &grass_gpu_mesh.vertex);
+    if(grass_gpu_mesh.index.buffer)
+        res_destroy_buffer(&allocator, &grass_gpu_mesh.index);
 
     if(heightmap_sampler)
         vkDestroySampler(device, heightmap_sampler, NULL);

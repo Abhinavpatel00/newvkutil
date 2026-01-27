@@ -104,6 +104,7 @@ DescriptorAllocator frame_alloc[FRAME_COUNT]  (reset every frame)
 
 
 descriptor_allocator_init(&global_alloc, device);
+
 for each frame:
     descriptor_allocator_init(&frame_alloc[i], device);
 Use
