@@ -60,7 +60,8 @@ void main()
     vec3 groundCol = vec3(0.18, 0.20, 0.16);
 
     float hemi = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 ambient = mix(groundCol, skyCol, hemi);
+    vec3 ambient = vec3(1.0,1.0,0.0);
+    
 
     vec3 color = albedo * ambient;
 

@@ -13,6 +13,7 @@
 extern "C" {
 #endif
 
+// TODO:can we just integate this binding system to while declaing render object because it is ultmatel just shader data and declaring elsewhere makes less sense
 typedef uint64_t BindingId;
 
 typedef struct RenderBinding

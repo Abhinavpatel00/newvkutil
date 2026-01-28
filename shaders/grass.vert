@@ -86,6 +86,7 @@ vec3 heightmapNormal(vec2 xz)
         vec2( 0.5, 0.0), vec2( 0.08, 1.0), vec2(-0.08, 1.0)
     );
 
+
 void main()
 {
     uint id = uint(gl_InstanceIndex);

@@ -30,6 +30,7 @@
 #include "file_utils.h"
 #include "terrain.h"
 
+#define VALIDATION false
 static void recreate_hdr_target(ResourceAllocator* allocator,
                                 VkDevice           device,
                                 VkQueue            queue,
@@ -345,7 +346,6 @@ typedef struct DOFPC
     float coc_scale;       // f^2 / (sensor_height * f_stop)
     float max_coc_px;      // pixels
     float z_near;          // camera near
-
 } DOFPC;
 
 
@@ -385,7 +385,7 @@ int main()
     else
         glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND);
 
-    assert(glfwInit());
+    glfwInit();
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(800, 600, "Vulkan", NULL, NULL);
@@ -412,7 +412,7 @@ int main()
         .instance_extension_count    = glfw_ext_count,
         .device_extension_count      = 1,
         .enable_gpu_based_validation = false,
-        .enable_validation           = true,
+        .enable_validation           = VALIDATION,
 
         .validation_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT
                                | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
@@ -2221,12 +2221,17 @@ int main()
 
             DOFPC dof_pc = {
 
-                .focal_distance = 10.0f,  // meters: good for outdoor / terrain scenes
+                .focal_distance = 1.0f,   // meters: good for outdoor / terrain scenes
                 .focal_length   = 0.05f,  // 50mm: human-eye-ish, neutral perspective
                 .coc_scale      = 0.0f,   // computed, not hardcoded (see below)
                 .max_coc_px     = 8.0f,   // pixels: strong but not stupid
                 .z_near         = cam.znear,
             };
+
+            float sensor_height = 0.024f;  // 24mm full-frame
+            float f_stop        = 2.8f;    // cinematic but not clownish
+
+            dof_pc.coc_scale = (dof_pc.focal_length * dof_pc.focal_length) / (sensor_height * f_stop);
             render_instance_set_push_data(&dof_inst, &dof_pc, sizeof(dof_pc));
             render_instance_push(cmd, &dof_inst);
 
@@ -2355,11 +2360,8 @@ int main()
                 vk_swapchain_recreate(device, gpu, &swap, w, h, qf.graphics_queue, upload_pool);
                 ImGui_ImplVulkan_SetMinImageCount(swap.image_count);
 
-
-                {
-                    destroy_depth_target(&allocator, &depth);
-                    create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
-                }
+                destroy_depth_target(&allocator, &depth);
+                create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
                 recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
                 hdr.sampler = tonemap_sampler;
                 recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width,

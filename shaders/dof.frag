@@ -52,11 +52,11 @@ void main()
     float cocPx = circleOfConfusionPx(z);
 
     // In focus → no blur
-    if(cocPx < 0.5)
-    {
-        outColor = texture(uColor, uv);
-        return;
-    }
+    // if(cocPx < 0.5)
+    // {
+    //     outColor = texture(uColor, uv);
+    //     return;
+    // }
 
     int radius = int(round(cocPx * 0.5));
     radius = clamp(radius, 1, int(pc.maxCoC));
@@ -67,18 +67,18 @@ void main()
     float wsum = 0.0;
 
     // 2D Gaussian (small radius only)
-    for(int y = -radius; y <= radius; y++)
-    {
-        for(int x = -radius; x <= radius; x++)
-        {
-            float w = gaussian(length(vec2(x, y)), sigma);
-            vec2 offset = vec2(x, y) * texel;
-            sum += texture(uColor, uv + offset).rgb * w;
-            wsum += w;
-        }
-    }
+    // for(int y = -radius; y <= radius; y++)
+    // {
+    //     for(int x = -radius; x <= radius; x++)
+    //     {
+    //         float w = gaussian(length(vec2(x, y)), sigma);
+    //         vec2 offset = vec2(x, y) * texel;
+    //         sum += texture(uColor, uv + offset).rgb * w;
+    //         wsum += w;
+    //     }
+    // }
 
-    vec3 color = sum / max(wsum, EPS);
+    vec3 color =  texture(uColor, uv).rgb;;
     outColor = vec4(color, 1.0);
 }
 
