@@ -1295,7 +1295,7 @@ int main()
         RW_BUF_O("g", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
         RW_BUF_O("materials_buf", material_buffer.buffer, material_buffer.offset, material_bytes),
     };
-    render_object_write_static(&tri_obj, tri_writes, (uint32_t)(sizeof(tri_writes) / sizeof(tri_writes[0])));
+    render_object_write_static(&tri_obj, tri_writes);
 
     RenderWrite toon_writes[] = {
         RW_BUF_O("drawCommands", draw_cmd_buffer.buffer, draw_cmd_buffer.offset, draw_cmd_bytes),
@@ -1304,7 +1304,7 @@ int main()
         RW_BUF_O("g", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
         RW_BUF_O("materials_buf", material_buffer.buffer, material_buffer.offset, material_bytes),
     };
-    render_object_write_static(&toon_obj, toon_writes, (uint32_t)(sizeof(toon_writes) / sizeof(toon_writes[0])));
+    render_object_write_static(&toon_obj, toon_writes);
 
     RenderWrite outline_writes[] = {
         RW_BUF_O("drawCommands", draw_cmd_buffer.buffer, draw_cmd_buffer.offset, draw_cmd_bytes),
@@ -1313,14 +1313,14 @@ int main()
         RW_BUF_O("g", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
         RW_BUF_O("materials_buf", material_buffer.buffer, material_buffer.offset, material_bytes),
     };
-    render_object_write_static(&toon_outline_obj, outline_writes, (uint32_t)(sizeof(outline_writes) / sizeof(outline_writes[0])));
+    render_object_write_static(&toon_outline_obj, outline_writes);
 
     RenderWrite terrain_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
         RW_IMG("uBaseHeight", base_height.view, base_height.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
         RW_IMG("uSculptDelta", sculpt_delta_img.view, sculpt_delta_img.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
-    render_object_write_static(&terrain_obj, terrain_writes, (uint32_t)(sizeof(terrain_writes) / sizeof(terrain_writes[0])));
+    render_object_write_static(&terrain_obj, terrain_writes);
 
     // Grass descriptor writes (procedural blades need only heightmaps + UBO)
     RenderWrite grass_writes[] = {
@@ -1328,14 +1328,14 @@ int main()
         RW_IMG("uBaseHeight", base_height.view, base_height.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
         RW_IMG("uSculptDelta", sculpt_delta_img.view, sculpt_delta_img.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
-    render_object_write_static(&grass_obj, grass_writes, (uint32_t)(sizeof(grass_writes) / sizeof(grass_writes[0])));
+    render_object_write_static(&grass_obj, grass_writes);
 
     RenderWrite water_writes[] = {
         RW_BUF_O("ubo", global_ubo_buf.buffer, global_ubo_buf.offset, sizeof(GlobalUBO)),
         RW_BUF_O("mat_buf", water_material_buf.buffer, water_material_buf.offset, sizeof(WaterMaterialGpu)),
         RW_BUF_O("inst_buf", water_instance_buf.buffer, water_instance_buf.offset, sizeof(WaterInstanceGpu)),
     };
-    render_object_write_static(&water_obj, water_writes, (uint32_t)(sizeof(water_writes) / sizeof(water_writes[0])));
+    render_object_write_static(&water_obj, water_writes);
 
     RenderWrite cull_writes[] = {
         RW_BUF_O("cullData", cull_data_buffer.buffer, cull_data_buffer.offset, sizeof(CullDataGpu)),
@@ -1346,18 +1346,17 @@ int main()
                  (VkDeviceSize)draw_count * sizeof(VkDrawIndexedIndirectCommand)),
         RW_BUF_O("drawCount", draw_count_buffer.buffer, draw_count_buffer.offset, sizeof(uint32_t)),
     };
-    render_object_write_static(&cull_obj, cull_writes, (uint32_t)(sizeof(cull_writes) / sizeof(cull_writes[0])));
+    render_object_write_static(&cull_obj, cull_writes);
 
     RenderWrite terrain_paint_writes[] = {
         RW_IMG("sculptDelta", sculpt_delta_img.view, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL),
     };
-    render_object_write_static(&terrain_paint_obj, terrain_paint_writes,
-                               (uint32_t)(sizeof(terrain_paint_writes) / sizeof(terrain_paint_writes[0])));
+    render_object_write_static(&terrain_paint_obj, terrain_paint_writes);
 
     RenderWrite raymarch_writes[] = {
         RW_BUF_O("params", raymarch_ubo.buffer, raymarch_ubo.offset, sizeof(RaymarchUBO)),
     };
-    render_object_write_static(&raymarch_obj, raymarch_writes, (uint32_t)(sizeof(raymarch_writes) / sizeof(raymarch_writes[0])));
+    render_object_write_static(&raymarch_obj, raymarch_writes);
 
     for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
     {
@@ -1365,14 +1364,14 @@ int main()
             RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
             RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
         };
-        render_object_write_frame(&dof_obj, i, dof_writes, (uint32_t)(sizeof(dof_writes) / sizeof(dof_writes[0])));
+        render_object_write_frame(&dof_obj, i,dof_writes, ARRAY_COUNT(dof_writes));
     }
 
 
     RenderWrite tonemap_writes[] = {
         RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
-    render_object_write_static(&tonemap_obj, tonemap_writes, 1);
+    render_object_write_static(&tonemap_obj, tonemap_writes);
 
 
     Camera cam = {0};
@@ -1673,7 +1672,7 @@ int main()
             RenderWrite tonemap_resize_writes[] = {
                 RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
             };
-            render_object_write_static(&tonemap_obj, tonemap_resize_writes, 1);
+            render_object_write_static(&tonemap_obj, tonemap_resize_writes);
             vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
             g_framebuffer_resized = false;
             igRender();
@@ -1846,7 +1845,7 @@ int main()
                 RenderWrite tonemap_resize_writes[] = {
                     RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
                 };
-                render_object_write_static(&tonemap_obj, tonemap_resize_writes, 1);
+                render_object_write_static(&tonemap_obj, tonemap_resize_writes);
                 vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
                 continue;
             }
@@ -2359,7 +2358,6 @@ int main()
 
                 vk_swapchain_recreate(device, gpu, &swap, w, h, qf.graphics_queue, upload_pool);
                 ImGui_ImplVulkan_SetMinImageCount(swap.image_count);
-
                 destroy_depth_target(&allocator, &depth);
                 create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
                 recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
@@ -2379,7 +2377,7 @@ int main()
                 RenderWrite tonemap_resize_writes[] = {
                     RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
                 };
-                render_object_write_static(&tonemap_obj, tonemap_resize_writes, 1);
+                render_object_write_static(&tonemap_obj, tonemap_resize_writes);
                 vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
 
                 continue;

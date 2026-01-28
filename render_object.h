@@ -192,6 +192,16 @@ RenderObjectSpec render_object_spec_from_config(const GraphicsPipelineConfig* cf
 // Reflection data
 // ------------------------------------------------------------
 
+typedef enum RenderBindingUsage
+{
+    RENDER_BIND_STATIC        = 0,
+    RENDER_BIND_PER_FRAME     = 1 << 0,
+    RENDER_BIND_SWAPCHAIN     = 1 << 1,
+    RENDER_BIND_UPDATE_AFTER  = 1 << 2,
+    RENDER_BIND_BINDLESS      = 1 << 3,
+} RenderBindingUsage;
+
+
 typedef struct RenderBindingInfo
 {
     const char*               name;
@@ -202,6 +212,8 @@ typedef struct RenderBindingInfo
     uint32_t                  descriptor_count;
     VkShaderStageFlags        stage_flags;
     VkDescriptorBindingFlags  binding_flags;
+
+    RenderBindingUsage usage; // <-- THIS
 } RenderBindingInfo;
 
 typedef struct RenderObjectReflection
@@ -383,8 +395,11 @@ void render_object_write_static_list(RenderObject* obj, const RenderWriteList* l
 
 void render_object_write_frame_list(RenderObject* obj, uint32_t frame_index, const RenderWriteList* list);
 
-void render_object_write_static(RenderObject* obj, const RenderWrite* writes, uint32_t write_count);
+void render_object_write_static_impl(RenderObject* obj, const RenderWrite* writes, uint32_t write_count);
 
+#define render_object_write_static(obj, writes_array) \
+    render_object_write_static_impl((obj), (writes_array), \
+        (uint32_t)(sizeof(writes_array) / sizeof((writes_array)[0])))
 void render_object_write_static_ids(RenderObject* obj, const RenderWriteId* writes, uint32_t write_count);
 
 void render_object_write_frame(RenderObject* obj, uint32_t frame_index, const RenderWrite* writes, uint32_t write_count);

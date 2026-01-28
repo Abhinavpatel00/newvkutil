@@ -2292,7 +2292,7 @@ void render_object_write_frame_list(RenderObject* obj, uint32_t frame_index, con
     render_object_write_frame_ids(obj, frame_index, list->writes, render_write_list_count(list));
 }
 
-void render_object_write_static(RenderObject* obj, const RenderWrite* writes, uint32_t write_count)
+void render_object_write_static_impl(RenderObject* obj, const RenderWrite* writes, uint32_t write_count)
 {
     if(!obj || !writes || write_count == 0)
         return;
