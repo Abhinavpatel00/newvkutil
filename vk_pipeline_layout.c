@@ -1,5 +1,6 @@
 #include "vk_pipeline_layout.h"
 
+
 static Hash64 hash_pipeline_layout_key(const PipelineLayoutKey* k)
 {
     Hash64 h = 0;
@@ -110,4 +111,6 @@ VkPipelineLayout pipeline_layout_cache_build(
 
     return pipeline_layout_cache_get(device, pipe_cache, layouts, set_count, push_ranges, push_count);
 }
+
+
 

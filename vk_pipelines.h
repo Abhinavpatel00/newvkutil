@@ -8,28 +8,47 @@
 #include <stdbool.h>
 #include <vulkan/vulkan_core.h>
 
+
+typedef struct GraphicsPipelineKey
+{
+    uint64_t config_hash;
+    uint64_t layout_hash;
+    uint64_t shader_hash;
+} GraphicsPipelineKey;
+
+typedef struct GraphicsPipelineCacheEntry
+{
+    GraphicsPipelineKey key;
+    VkPipeline          pipeline;
+} GraphicsPipelineCacheEntry;
+
+typedef struct GraphicsPipelineCache
+{
+    GraphicsPipelineCacheEntry* entries;
+    size_t                      count;
+    size_t                      capacity;
+} GraphicsPipelineCache;
+
 // ============================================================================
 // Graphics Pipeline Config - minimal, no shader module fields
 // ============================================================================
 
 typedef struct GraphicsPipelineConfig
 {
-    // Vertex input (optional - can be NULL for vertex-pulling)
-    uint32_t                          vertex_binding_count;
-    uint32_t                          vertex_attribute_count;
-    VkVertexInputBindingDescription   vertex_bindings[8];
-    VkVertexInputAttributeDescription vertex_attributes[16];
     // Rasterization
     VkCullModeFlags cull_mode;
     VkFrontFace     front_face;
     VkPolygonMode   polygon_mode;
+    //
+    //
 
+    bool primitive_restart_enable;
     // Input assembly
     VkPrimitiveTopology topology;
 
     // Depth/stencil
-    VkBool32    depth_test_enable;
-    VkBool32    depth_write_enable;
+    bool        depth_test_enable;
+    bool        depth_write_enable;
     VkCompareOp depth_compare_op;
     // Attachments (dynamic rendering)
     uint32_t        color_attachment_count;
@@ -77,16 +96,16 @@ VkPipeline create_compute_pipeline(VkDevice               device,
 
 // Registers a graphics pipeline for hot-reload when config->reloadable is true.
 // Keeps the pipeline handle updated in-place when the shader files change.
-void pipeline_hot_reload_register_graphics(VkPipeline*            pipeline,
-                                           VkPipelineLayout*      layout,
-                                           VkDevice               device,
-                                           VkPipelineCache        cache,
-                                           DescriptorLayoutCache* desc_cache,
-                                           PipelineLayoutCache*   pipe_cache,
-                                           const char*            vert_shader_path,
-                                           const char*            frag_shader_path,
+void pipeline_hot_reload_register_graphics(VkPipeline*             pipeline,
+                                           VkPipelineLayout*       layout,
+                                           VkDevice                device,
+                                           VkPipelineCache         cache,
+                                           DescriptorLayoutCache*  desc_cache,
+                                           PipelineLayoutCache*    pipe_cache,
+                                           const char*             vert_shader_path,
+                                           const char*             frag_shader_path,
                                            GraphicsPipelineConfig* config,
-                                           VkPipelineLayout       forced_layout);
+                                           VkPipelineLayout        forced_layout);
 
 // Registers a compute pipeline for hot-reload when reloadable is true.
 // Keeps the pipeline handle updated in-place when the shader file changes.
@@ -125,5 +144,18 @@ static inline GraphicsPipelineConfig graphics_pipeline_config_default(void)
         .reloadable             = false,
     };
 }
+
+
+VkPipeline get_or_create_graphics_pipeline(GraphicsPipelineCache*        pso_cache,
+                                           VkDevice                      device,
+                                           VkPipelineCache               vk_cache,
+                                           DescriptorLayoutCache*        desc_cache,
+                                           PipelineLayoutCache*          pipe_cache,
+                                           const char*                   vert_path,
+                                           const char*                   frag_path,
+                                           const GraphicsPipelineConfig* user_cfg,
+                                           VkPipelineLayout              forced_layout,
+                                           VkPipelineLayout*             out_layout);
+
 
 #endif  // VK_PIPELINES_H_

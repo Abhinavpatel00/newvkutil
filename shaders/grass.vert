@@ -82,7 +82,7 @@ vec3 heightmapNormal(vec2 xz)
 }
 
     const vec2 blade[6] = vec2[](
-        vec2(-0.5, 0.0), vec2( 0.5, 0.0), vec2(-0.08, 1.0),
+        vec2(-0.5, 1.0), vec2( 0.5, 3.0), vec2(-0.08, 1.0),
         vec2( 0.5, 0.0), vec2( 0.08, 1.0), vec2(-0.08, 1.0)
     );
 

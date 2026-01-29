@@ -1,4 +1,4 @@
-
+#include "vk_pipeline_layout.h"
 #include "vk_pipelines.h"
 
 #include <errno.h>
@@ -11,6 +11,26 @@
 // ============================================================================
 // Internal helpers
 // ============================================================================
+
+uint64_t pipeline_layout_hash(PipelineLayoutCache* cache, VkPipelineLayout layout)
+{
+    for(int i = 0; i < arrlen(cache->entries); i++)
+    {
+        if(cache->entries[i].layout == layout)
+            return cache->entries[i].key.hash;
+    }
+
+    // This should never happen if layouts only come from the cache
+    return 0;
+}
+typedef struct DerivedVertexInput
+{
+    uint32_t                          binding_count;
+    uint32_t                          attribute_count;
+    VkVertexInputBindingDescription   bindings[8];
+    VkVertexInputAttributeDescription attributes[16];
+} DerivedVertexInput;
+
 void vk_cmd_set_viewport_scissor(VkCommandBuffer cmd, VkExtent2D extent)
 {
     VkViewport vp = {
@@ -102,6 +122,7 @@ static uint64_t file_mtime_ns(const char* path)
 #endif
 }
 
+
 static char* str_dup(const char* s)
 {
     if(!s)
@@ -157,6 +178,11 @@ static bool spv_to_source_path(char* out, size_t out_cap, const char* spv_path)
     return (n > 0 && (size_t)n < out_cap);
 }
 
+
+static uint64_t hash_spirv_xx(const void* data, size_t size)
+{
+    return XXH64(data, size, 0xBADC0DEULL);
+}
 // ============================================================================
 // GLSL compile (Linux dev mode)
 // ============================================================================
@@ -233,7 +259,7 @@ typedef struct PipelineHotReloadEntry
     uint64_t frag_mtime;
     uint64_t comp_mtime;
 } PipelineHotReloadEntry;
-
+static GraphicsPipelineCache g_graphics_pso_cache = {0};
 static PipelineHotReloadEntry* g_reload_entries = NULL;
 static size_t                  g_reload_count   = 0;
 static size_t                  g_reload_cap     = 0;
@@ -421,9 +447,9 @@ void pipeline_hot_reload_update(void)
         e->frag_mtime = frag_src_mtime;
 
         VkPipelineLayout new_layout = VK_NULL_HANDLE;
-        VkPipeline new_pipe = create_graphics_pipeline(e->device, e->cache, e->desc_cache, e->pipe_cache, e->vert_path,
-                                                       e->frag_path, &e->gfx_cfg, e->forced_layout, &new_layout);
-
+        VkPipeline       new_pipe =
+            get_or_create_graphics_pipeline(&g_graphics_pso_cache, e->device, e->cache, e->desc_cache, e->pipe_cache,
+                                            e->vert_path, e->frag_path, &e->gfx_cfg, e->forced_layout, &new_layout);
         if(new_pipe != VK_NULL_HANDLE)
         {
             vkDeviceWaitIdle(e->device);
@@ -495,30 +521,21 @@ VkPipeline create_graphics_pipeline(VkDevice                device,
             .pName  = "main",
         },
     };
-
-    VkPipelineVertexInputStateCreateInfo vertex_input = {
-        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .pNext                           = NULL,
-        .flags                           = 0,
-        .vertexBindingDescriptionCount   = 0,
-        .pVertexBindingDescriptions      = NULL,
-        .vertexAttributeDescriptionCount = 0,
-        .pVertexAttributeDescriptions    = NULL,
-    };
-
+    DerivedVertexInput derived = {0};
     if(cfg->use_vertex_input)
     {
+
         ShaderReflection vert_reflect;
         shader_reflect_create(&vert_reflect, vert_code, vert_size);
 
-        cfg->vertex_attribute_count = shader_reflect_get_vertex_attributes(&vert_reflect, cfg->vertex_attributes, 16, 0);
+        derived.attribute_count = shader_reflect_get_vertex_attributes(&vert_reflect, derived.attributes, 16, 0);
 
         uint32_t stride = 0;
-        for(uint32_t i = 0; i < cfg->vertex_attribute_count; i++)
+        for(uint32_t i = 0; i < derived.attribute_count; i++)
         {
-            uint32_t end = cfg->vertex_attributes[i].offset;
+            uint32_t end = derived.attributes[i].offset;
 
-            switch(cfg->vertex_attributes[i].format)
+            switch(derived.attributes[i].format)
             {
                 case VK_FORMAT_R32_SFLOAT:
                     end += 4;
@@ -541,32 +558,34 @@ VkPipeline create_graphics_pipeline(VkDevice                device,
                 stride = end;
         }
 
-        cfg->vertex_binding_count = (cfg->vertex_attribute_count > 0) ? 1 : 0;
-
-        if(cfg->vertex_binding_count == 1)
+        if(derived.attribute_count > 0)
         {
-            cfg->vertex_bindings[0] = (VkVertexInputBindingDescription){
-                .binding   = 0,
-                .stride    = stride,
-                .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+            derived.binding_count = 1;
+            derived.bindings[0]   = (VkVertexInputBindingDescription){
+                  .binding   = 0,
+                  .stride    = stride,
+                  .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
             };
         }
-
-        vertex_input.vertexBindingDescriptionCount   = cfg->vertex_binding_count;
-        vertex_input.pVertexBindingDescriptions      = (cfg->vertex_binding_count > 0) ? cfg->vertex_bindings : NULL;
-        vertex_input.vertexAttributeDescriptionCount = cfg->vertex_attribute_count;
-        vertex_input.pVertexAttributeDescriptions = (cfg->vertex_attribute_count > 0) ? cfg->vertex_attributes : NULL;
     }
     else
     {
-        cfg->vertex_binding_count   = 0;
-        cfg->vertex_attribute_count = 0;
+        derived.binding_count   = 0;
+        derived.attribute_count = 0;
     }
 
+    VkPipelineVertexInputStateCreateInfo vertex_input = {
+        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount   = derived.binding_count,
+        .pVertexBindingDescriptions      = derived.binding_count ? derived.bindings : NULL,
+        .vertexAttributeDescriptionCount = derived.attribute_count,
+        .pVertexAttributeDescriptions    = derived.attribute_count ? derived.attributes : NULL,
+    };
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology               = cfg->topology,
-        .primitiveRestartEnable = VK_FALSE,
+        .primitiveRestartEnable = cfg->primitive_restart_enable ? VK_TRUE : VK_FALSE,
+
     };
 
     VkPipelineViewportStateCreateInfo viewport = {
@@ -660,6 +679,44 @@ VkPipeline create_graphics_pipeline(VkDevice                device,
     return pipeline;
 }
 
+
+uint64_t hash_graphics_pipeline_config_xx(const GraphicsPipelineConfig* cfg)
+{
+    XXH64_state_t* h = XXH64_createState();
+    XXH64_reset(h, 0xC0FFEEULL);
+
+    GraphicsPipelineConfig tmp = {0};
+
+    tmp.cull_mode                = cfg->cull_mode;
+    tmp.front_face               = cfg->front_face;
+    tmp.polygon_mode             = cfg->polygon_mode;
+    tmp.primitive_restart_enable = cfg->primitive_restart_enable;
+    tmp.topology                 = cfg->topology;
+    tmp.depth_test_enable        = cfg->depth_test_enable;
+    tmp.depth_write_enable       = cfg->depth_write_enable;
+    tmp.depth_compare_op         = cfg->depth_compare_op;
+    tmp.color_attachment_count   = cfg->color_attachment_count;
+    tmp.depth_format             = cfg->depth_format;
+    tmp.stencil_format           = cfg->stencil_format;
+    tmp.use_vertex_input         = cfg->use_vertex_input;
+    tmp.blend_enable             = cfg->blend_enable;
+
+    // explicitly excluded:
+    // - color_formats (pointer)
+    // - reloadable
+    // - vertex bindings / attributes (derived)
+
+    XXH64_update(h, &tmp, sizeof(tmp));
+
+    for(uint32_t i = 0; i < cfg->color_attachment_count; i++)
+    {
+        XXH64_update(h, &cfg->color_formats[i], sizeof(VkFormat));
+    }
+
+    uint64_t out = XXH64_digest(h);
+    XXH64_freeState(h);
+    return out;
+}
 // ============================================================================
 // Compute Pipeline
 // ============================================================================
@@ -704,6 +761,100 @@ VkPipeline create_compute_pipeline(VkDevice               device,
 
     vkDestroyShaderModule(device, comp_mod, NULL);
     free(comp_code);
+
+    return pipeline;
+}
+
+
+VkPipeline get_or_create_graphics_pipeline(GraphicsPipelineCache*        pso_cache,
+                                           VkDevice                      device,
+                                           VkPipelineCache               vk_cache,
+                                           DescriptorLayoutCache*        desc_cache,
+                                           PipelineLayoutCache*          pipe_cache,
+                                           const char*                   vert_path,
+                                           const char*                   frag_path,
+                                           const GraphicsPipelineConfig* user_cfg,
+                                           VkPipelineLayout              forced_layout,
+                                           VkPipelineLayout*             out_layout)
+{
+    // --------------------------------------------------
+    // Load shaders
+    // --------------------------------------------------
+    void*  vert_code = NULL;
+    size_t vert_size = 0;
+    void*  frag_code = NULL;
+    size_t frag_size = 0;
+
+    if(!read_file(vert_path, &vert_code, &vert_size))
+        return VK_NULL_HANDLE;
+    if(!read_file(frag_path, &frag_code, &frag_size))
+    {
+        free(vert_code);
+        return VK_NULL_HANDLE;
+    }
+
+
+    uint64_t shader_hash = XXH64(vert_code, vert_size, 0xA1) ^ (XXH64(frag_code, frag_size, 0xB2) * 0x9E3779B97F4A7C15ull);
+    // --------------------------------------------------
+    // Build / fetch pipeline layout (reflection)
+    // --------------------------------------------------
+    const void*  spirvs[2] = {vert_code, frag_code};
+    const size_t sizes[2]  = {vert_size, frag_size};
+
+    VkPipelineLayout layout = forced_layout;
+    if(layout == VK_NULL_HANDLE)
+        layout = shader_reflect_build_pipeline_layout(device, desc_cache, pipe_cache, spirvs, sizes, 2);
+
+    uint64_t layout_hash = pipeline_layout_hash(pipe_cache, layout);
+
+    if(out_layout)
+        *out_layout = layout;
+
+    // --------------------------------------------------
+    // Build PSO key
+    // --------------------------------------------------
+    GraphicsPipelineKey key = {
+        .config_hash = hash_graphics_pipeline_config_xx(user_cfg),
+        .layout_hash = layout_hash,
+        .shader_hash = shader_hash,
+    };
+
+    // --------------------------------------------------
+    // Lookup
+    // --------------------------------------------------
+    for(size_t i = 0; i < pso_cache->count; i++)
+    {
+        if(memcmp(&pso_cache->entries[i].key, &key, sizeof(key)) == 0)
+        {
+            free(vert_code);
+            free(frag_code);
+            return pso_cache->entries[i].pipeline;
+        }
+    }
+
+    // --------------------------------------------------
+    // Miss → create
+    // --------------------------------------------------
+    VkPipeline pipeline = create_graphics_pipeline(device, vk_cache, desc_cache, pipe_cache, vert_path, frag_path,
+                                                   (GraphicsPipelineConfig*)user_cfg, layout, NULL);
+
+    free(vert_code);
+    free(frag_code);
+
+    if(pipeline == VK_NULL_HANDLE)
+        return VK_NULL_HANDLE;
+
+    // --------------------------------------------------
+    // Insert
+    // --------------------------------------------------
+    if(pso_cache->count == pso_cache->capacity)
+    {
+        size_t new_cap      = pso_cache->capacity ? pso_cache->capacity * 2 : 16;
+        pso_cache->entries  = realloc(pso_cache->entries, new_cap * sizeof(*pso_cache->entries));
+        pso_cache->capacity = new_cap;
+    }
+
+    pso_cache->entries[pso_cache->count++] = (GraphicsPipelineCacheEntry){key, pipeline};
 
     return pipeline;
 }

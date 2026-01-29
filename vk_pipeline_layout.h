@@ -15,7 +15,6 @@
 
 typedef uint64_t Hash64;
 Hash64           hash64_bytes(const void* data, size_t size);
-
 typedef struct PipelineLayoutKey
 {
     VkDescriptorSetLayout set_layouts[VK_MAX_PIPELINE_SETS];
@@ -26,6 +25,7 @@ typedef struct PipelineLayoutKey
 
     Hash64 hash;
 } PipelineLayoutKey;
+
 
 typedef struct PipelineLayoutEntry
 {
@@ -51,15 +51,15 @@ void pipeline_layout_cache_destroy(VkDevice device, PipelineLayoutCache* cache);
 
 // bindless-capable builder
 VkPipelineLayout pipeline_layout_cache_build(VkDevice                                   device,
-                                                DescriptorLayoutCache*                     desc_cache,
-                                                PipelineLayoutCache*                       pipe_cache,
-                                                const VkDescriptorSetLayoutBinding* const* set_bindings,
-                                                const uint32_t*                            binding_counts,
-                                                const VkDescriptorSetLayoutCreateFlags* set_create_flags,  // optional, can be NULL
-                                                const VkDescriptorBindingFlags* const* set_binding_flags,  // optional, can be NULL
-                                                uint32_t                   set_count,
-                                                const VkPushConstantRange* push_ranges,
-                                                uint32_t                   push_count);
+                                             DescriptorLayoutCache*                     desc_cache,
+                                             PipelineLayoutCache*                       pipe_cache,
+                                             const VkDescriptorSetLayoutBinding* const* set_bindings,
+                                             const uint32_t*                            binding_counts,
+                                             const VkDescriptorSetLayoutCreateFlags* set_create_flags,  // optional, can be NULL
+                                             const VkDescriptorBindingFlags* const* set_binding_flags,  // optional, can be NULL
+                                             uint32_t                   set_count,
+                                             const VkPushConstantRange* push_ranges,
+                                             uint32_t                   push_count);
 
 
 #endif  // VK_PIPELINE_LAYOUT_H_
