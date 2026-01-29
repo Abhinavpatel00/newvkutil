@@ -9,6 +9,8 @@
 #include <vulkan/vulkan_core.h>
 
 
+
+
 typedef struct GraphicsPipelineKey
 {
     uint64_t config_hash;
@@ -29,6 +31,25 @@ typedef struct GraphicsPipelineCache
     size_t                      capacity;
 } GraphicsPipelineCache;
 
+typedef struct ComputePipelineKey
+{
+    uint64_t shader_hash;
+    uint64_t layout_hash;
+} ComputePipelineKey;
+
+
+typedef struct ComputePipelineCacheEntry
+{
+    ComputePipelineKey key;
+    VkPipeline         pipeline;
+} ComputePipelineCacheEntry;
+
+typedef struct ComputePipelineCache
+{
+    ComputePipelineCacheEntry* entries;
+    size_t                     count;
+    size_t                     capacity;
+} ComputePipelineCache;
 // ============================================================================
 // Graphics Pipeline Config - minimal, no shader module fields
 // ============================================================================
@@ -146,16 +167,17 @@ static inline GraphicsPipelineConfig graphics_pipeline_config_default(void)
 }
 
 
-VkPipeline get_or_create_graphics_pipeline(GraphicsPipelineCache*        pso_cache,
-                                           VkDevice                      device,
-                                           VkPipelineCache               vk_cache,
-                                           DescriptorLayoutCache*        desc_cache,
-                                           PipelineLayoutCache*          pipe_cache,
-                                           const char*                   vert_path,
-                                           const char*                   frag_path,
-                                           const GraphicsPipelineConfig* user_cfg,
-                                           VkPipelineLayout              forced_layout,
-                                           VkPipelineLayout*             out_layout);
+VkPipeline get_or_create_graphics_pipeline(
+    GraphicsPipelineCache*        pso_cache,
+    VkDevice                      device,
+    VkPipelineCache               vk_cache,
+    DescriptorLayoutCache*        desc_cache,
+    PipelineLayoutCache*          pipe_cache,
+    const char*                   vert_path,
+    const char*                   frag_path,
+    const GraphicsPipelineConfig* user_cfg,
+    VkPipelineLayout              forced_layout,
+    VkPipelineLayout*             out_layout);
 
 
 #endif  // VK_PIPELINES_H_

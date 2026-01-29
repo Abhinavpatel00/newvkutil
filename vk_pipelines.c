@@ -179,10 +179,6 @@ static bool spv_to_source_path(char* out, size_t out_cap, const char* spv_path)
 }
 
 
-static uint64_t hash_spirv_xx(const void* data, size_t size)
-{
-    return XXH64(data, size, 0xBADC0DEULL);
-}
 // ============================================================================
 // GLSL compile (Linux dev mode)
 // ============================================================================
@@ -259,10 +255,11 @@ typedef struct PipelineHotReloadEntry
     uint64_t frag_mtime;
     uint64_t comp_mtime;
 } PipelineHotReloadEntry;
-static GraphicsPipelineCache g_graphics_pso_cache = {0};
-static PipelineHotReloadEntry* g_reload_entries = NULL;
-static size_t                  g_reload_count   = 0;
-static size_t                  g_reload_cap     = 0;
+static GraphicsPipelineCache   g_graphics_pso_cache = {0};
+static ComputePipelineCache    g_compute_pso_cache  = {0};
+static PipelineHotReloadEntry* g_reload_entries     = NULL;
+static size_t                  g_reload_count       = 0;
+static size_t                  g_reload_cap         = 0;
 
 static void reload_entries_push(const PipelineHotReloadEntry* entry)
 {
@@ -364,106 +361,6 @@ void pipeline_hot_reload_register_compute(VkPipeline*            pipeline,
     reload_entries_push(&entry);
 }
 
-// ============================================================================
-// Hot reload update
-// ============================================================================
-
-void pipeline_hot_reload_update(void)
-{
-    for(size_t i = 0; i < g_reload_count; i++)
-    {
-        PipelineHotReloadEntry* e = &g_reload_entries[i];
-
-        if(!e->reloadable || !e->pipeline || !e->device)
-            continue;
-
-        // ----------------------------
-        // Compute
-        // ----------------------------
-        if(e->is_compute)
-        {
-            char comp_src[1024];
-            if(!spv_to_source_path(comp_src, sizeof(comp_src), e->comp_path))
-                continue;
-
-            uint64_t comp_src_mtime = file_mtime_ns(comp_src);
-            if(comp_src_mtime == e->comp_mtime)
-                continue;
-
-            if(!compile_glsl_to_spv(comp_src, e->comp_path))
-                continue;
-
-            e->comp_mtime = comp_src_mtime;
-
-            VkPipelineLayout new_layout = VK_NULL_HANDLE;
-            VkPipeline       new_pipe =
-                create_compute_pipeline(e->device, e->cache, e->desc_cache, e->pipe_cache, e->comp_path, &new_layout);
-
-            if(new_pipe != VK_NULL_HANDLE)
-            {
-                vkDeviceWaitIdle(e->device);
-
-                if(*e->pipeline)
-                    vkDestroyPipeline(e->device, *e->pipeline, NULL);
-
-                *e->pipeline = new_pipe;
-
-                if(e->layout)
-                    *e->layout = new_layout;
-            }
-
-            continue;  // IMPORTANT: don't fall into graphics path
-        }
-
-        // ----------------------------
-        // Graphics
-        // ----------------------------
-        char vert_src[1024], frag_src[1024];
-        if(!spv_to_source_path(vert_src, sizeof(vert_src), e->vert_path)
-           || !spv_to_source_path(frag_src, sizeof(frag_src), e->frag_path))
-        {
-            continue;
-        }
-
-        uint64_t vert_src_mtime = file_mtime_ns(vert_src);
-        uint64_t frag_src_mtime = file_mtime_ns(frag_src);
-
-        if(vert_src_mtime == e->vert_mtime && frag_src_mtime == e->frag_mtime)
-            continue;
-
-        bool ok = true;
-
-        if(vert_src_mtime != e->vert_mtime)
-            ok &= compile_glsl_to_spv(vert_src, e->vert_path);
-
-        if(frag_src_mtime != e->frag_mtime)
-            ok &= compile_glsl_to_spv(frag_src, e->frag_path);
-
-        if(!ok)
-            continue;
-
-        // Update mtimes only after successful compile
-        e->vert_mtime = vert_src_mtime;
-        e->frag_mtime = frag_src_mtime;
-
-        VkPipelineLayout new_layout = VK_NULL_HANDLE;
-        VkPipeline       new_pipe =
-            get_or_create_graphics_pipeline(&g_graphics_pso_cache, e->device, e->cache, e->desc_cache, e->pipe_cache,
-                                            e->vert_path, e->frag_path, &e->gfx_cfg, e->forced_layout, &new_layout);
-        if(new_pipe != VK_NULL_HANDLE)
-        {
-            vkDeviceWaitIdle(e->device);
-
-            if(*e->pipeline)
-                vkDestroyPipeline(e->device, *e->pipeline, NULL);
-
-            *e->pipeline = new_pipe;
-
-            if(e->layout)
-                *e->layout = new_layout;
-        }
-    }
-}
 
 // ============================================================================
 // Graphics Pipeline
@@ -857,4 +754,166 @@ VkPipeline get_or_create_graphics_pipeline(GraphicsPipelineCache*        pso_cac
     pso_cache->entries[pso_cache->count++] = (GraphicsPipelineCacheEntry){key, pipeline};
 
     return pipeline;
+}
+
+
+VkPipeline get_or_create_compute_pipeline(ComputePipelineCache*  cache,
+                                          VkDevice               device,
+                                          VkPipelineCache        vk_cache,
+                                          DescriptorLayoutCache* desc_cache,
+                                          PipelineLayoutCache*   pipe_cache,
+                                          const char*            comp_path,
+                                          VkPipelineLayout*      out_layout)
+{
+    void*  code = NULL;
+    size_t size = 0;
+
+    if(!read_file(comp_path, &code, &size))
+        return VK_NULL_HANDLE;
+
+    uint64_t shader_hash = XXH64(code, size, 0xC0FFEEULL);
+
+    const void*  spirvs[1] = {code};
+    const size_t sizes[1]  = {size};
+
+    VkPipelineLayout layout = shader_reflect_build_pipeline_layout(device, desc_cache, pipe_cache, spirvs, sizes, 1);
+
+    uint64_t layout_hash = pipeline_layout_hash(pipe_cache, layout);
+
+    if(out_layout)
+        *out_layout = layout;
+
+    ComputePipelineKey key = {
+        .shader_hash = shader_hash,
+        .layout_hash = layout_hash,
+    };
+
+    for(size_t i = 0; i < cache->count; i++)
+    {
+        if(memcmp(&cache->entries[i].key, &key, sizeof(key)) == 0)
+        {
+            free(code);
+            return cache->entries[i].pipeline;
+        }
+    }
+
+    VkPipeline pipeline = create_compute_pipeline(device, vk_cache, desc_cache, pipe_cache, comp_path, NULL);
+
+    free(code);
+
+    if(pipeline == VK_NULL_HANDLE)
+        return VK_NULL_HANDLE;
+
+    if(cache->count == cache->capacity)
+    {
+        size_t new_cap  = cache->capacity ? cache->capacity * 2 : 16;
+        cache->entries  = realloc(cache->entries, new_cap * sizeof(*cache->entries));
+        cache->capacity = new_cap;
+    }
+
+    cache->entries[cache->count++] = (ComputePipelineCacheEntry){key, pipeline};
+
+    return pipeline;
+}
+
+
+// ============================================================================
+// Hot reload update
+// ============================================================================
+
+void pipeline_hot_reload_update(void)
+{
+    for(size_t i = 0; i < g_reload_count; i++)
+    {
+        PipelineHotReloadEntry* e = &g_reload_entries[i];
+
+        if(!e->reloadable || !e->pipeline || !e->device)
+            continue;
+
+        // ----------------------------
+        // Compute
+        // ----------------------------
+        if(e->is_compute)
+        {
+            char comp_src[1024];
+            if(!spv_to_source_path(comp_src, sizeof(comp_src), e->comp_path))
+                continue;
+
+            uint64_t comp_src_mtime = file_mtime_ns(comp_src);
+            if(comp_src_mtime == e->comp_mtime)
+                continue;
+
+            if(!compile_glsl_to_spv(comp_src, e->comp_path))
+                continue;
+
+            e->comp_mtime = comp_src_mtime;
+
+            VkPipelineLayout new_layout = VK_NULL_HANDLE;
+            VkPipeline       new_pipe   = get_or_create_compute_pipeline(&g_compute_pso_cache, e->device, e->cache,
+                                                                         e->desc_cache, e->pipe_cache, e->comp_path, &new_layout);
+
+            if(new_pipe != VK_NULL_HANDLE)
+            {
+                vkDeviceWaitIdle(e->device);
+
+                if(*e->pipeline)
+                    vkDestroyPipeline(e->device, *e->pipeline, NULL);
+
+                *e->pipeline = new_pipe;
+
+                if(e->layout)
+                    *e->layout = new_layout;
+            }
+
+            continue;  // IMPORTANT: don't fall into graphics path
+        }
+
+        // ----------------------------
+        // Graphics
+        // ----------------------------
+        char vert_src[1024], frag_src[1024];
+        if(!spv_to_source_path(vert_src, sizeof(vert_src), e->vert_path)
+           || !spv_to_source_path(frag_src, sizeof(frag_src), e->frag_path))
+        {
+            continue;
+        }
+
+        uint64_t vert_src_mtime = file_mtime_ns(vert_src);
+        uint64_t frag_src_mtime = file_mtime_ns(frag_src);
+
+        if(vert_src_mtime == e->vert_mtime && frag_src_mtime == e->frag_mtime)
+            continue;
+
+        bool ok = true;
+
+        if(vert_src_mtime != e->vert_mtime)
+            ok &= compile_glsl_to_spv(vert_src, e->vert_path);
+
+        if(frag_src_mtime != e->frag_mtime)
+            ok &= compile_glsl_to_spv(frag_src, e->frag_path);
+
+        if(!ok)
+            continue;
+
+        // Update mtimes only after successful compile
+        e->vert_mtime = vert_src_mtime;
+        e->frag_mtime = frag_src_mtime;
+
+        VkPipelineLayout new_layout = VK_NULL_HANDLE;
+        VkPipeline       new_pipe =
+            get_or_create_graphics_pipeline(&g_graphics_pso_cache, e->device, e->cache, e->desc_cache, e->pipe_cache,
+                                            e->vert_path, e->frag_path, &e->gfx_cfg, e->forced_layout, &new_layout);
+        if(new_pipe != VK_NULL_HANDLE)
+        {
+            vkDeviceWaitIdle(e->device);
+
+            if(*e->pipeline)
+                vkDestroyPipeline(e->device, *e->pipeline, NULL);
+
+            *e->pipeline = new_pipe;
+
+            if(e->layout)
+                *e->layout = new_layout;
+        }
+    }
 }

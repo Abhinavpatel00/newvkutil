@@ -37,12 +37,11 @@ layout(push_constant) uniform GrassPC {
 void main()
 {
     vec3 N = normalize(vWorldNrm);
-
     // --------------------------------------------------------
     // Blade gradient (base -> tip)
     // --------------------------------------------------------
     float tip = clamp(vBladeT, 0.0, 1.0);
-    tip = tip * tip * (3.0 - 2.0 * tip); // smoothstep without function call
+    tip = tip * tip * (8.0 - 2.0 * tip); // smoothstep without function call
 
     vec3 baseA = vec3(0.08, 0.32, 0.12); // dark green
     vec3 baseB = vec3(0.12, 0.38, 0.18);
