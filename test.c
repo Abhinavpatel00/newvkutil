@@ -1364,7 +1364,7 @@ int main()
             RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
             RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
         };
-        render_object_write_frame(&dof_obj, i,dof_writes, ARRAY_COUNT(dof_writes));
+        render_object_write_frame(&dof_obj, i, dof_writes, ARRAY_COUNT(dof_writes));
     }
 
 
@@ -1474,15 +1474,75 @@ int main()
     bool last_load_key  = false;
     bool last_regen_key = false;
 
+    bool swapchain_needs_recreate = false;
 
     const float    lod_target  = 1.0f;  // max screen-space error in pixels
     const uint32_t lod_enabled = 1;
 
     while(!glfwWindowShouldClose(window))
     {
+
         TracyCFrameMarkStart("Frame");
+
+
         double cpu_frame_start = glfwGetTime();
         glfwPollEvents();
+
+
+        int fb_w, fb_h;
+        glfwGetFramebufferSize(window, &fb_w, &fb_h);
+
+
+
+swapchain_needs_recreate |=
+    g_framebuffer_resized ||
+    fb_w != (int)swap.extent.width ||
+    fb_h != (int)swap.extent.height;
+        if(swapchain_needs_recreate)
+        {
+            int w = 0, h = 0;
+            glfwGetFramebufferSize(window, &w, &h);
+
+            // Minimized window: wait
+            if(w == 0 || h == 0)
+            {
+                glfwWaitEvents();
+                continue;
+            }
+
+            vkDeviceWaitIdle(device);
+
+
+            vk_swapchain_recreate(device, gpu, &swap, w, h, qf.graphics_queue, upload_pool);
+            ImGui_ImplVulkan_SetMinImageCount(swap.image_count);
+            destroy_depth_target(&allocator, &depth);
+            create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
+            recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
+            hdr.sampler = tonemap_sampler;
+            recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr_dof);
+            hdr_dof.sampler = tonemap_sampler;
+            for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
+            {
+                RenderWrite dof_resize_writes[] = {
+                    RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                    RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                };
+                render_object_write_frame(&dof_obj, i, dof_resize_writes,
+                                          (uint32_t)(sizeof(dof_resize_writes) / sizeof(dof_resize_writes[0])));
+            }
+            RenderWrite tonemap_resize_writes[] = {
+                RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+            };
+            render_object_write_static(&tonemap_obj, tonemap_resize_writes);
+            vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
+            g_framebuffer_resized = false;
+            igRender();
+
+
+            swapchain_needs_recreate = false;
+
+            continue;  // restart frame cleanly
+        }
 
         render_pipeline_hot_reload_update();
 
@@ -1640,44 +1700,7 @@ int main()
         cull.counts[1]   = lod_enabled;
 
         memcpy(cull_data_buffer.mapping, &cull, sizeof(cull));
-        int w = 0, h = 0;
-        glfwGetFramebufferSize(window, &w, &h);
 
-        if(w == 0 || h == 0)
-        {
-            igRender();
-            continue;
-        }
-
-        if(g_framebuffer_resized || w != (int)swap.extent.width || h != (int)swap.extent.height)
-        {
-            vkDeviceWaitIdle(device);
-            vk_swapchain_recreate(device, gpu, &swap, w, h, qf.graphics_queue, upload_pool);
-            ImGui_ImplVulkan_SetMinImageCount(swap.image_count);
-            destroy_depth_target(&allocator, &depth);
-            create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
-            recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
-            hdr.sampler = tonemap_sampler;
-            recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr_dof);
-            hdr_dof.sampler = tonemap_sampler;
-            for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
-            {
-                RenderWrite dof_resize_writes[] = {
-                    RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-                    RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-                };
-                render_object_write_frame(&dof_obj, i, dof_resize_writes,
-                                          (uint32_t)(sizeof(dof_resize_writes) / sizeof(dof_resize_writes[0])));
-            }
-            RenderWrite tonemap_resize_writes[] = {
-                RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-            };
-            render_object_write_static(&tonemap_obj, tonemap_resize_writes);
-            vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
-            g_framebuffer_resized = false;
-            igRender();
-            continue;
-        }
 
         // Tiny Glade style: click to anchor, drag up/down to sculpt
         bool  mouse_down   = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
@@ -1689,8 +1712,8 @@ int main()
         {
             vec2  hover_xz;
             float terrain_y_hint = terrain_gui.height_scale * 0.5f;
-            if(screen_to_world_xz_heightfield(&cam, (float)mx, (float)my, (float)w, (float)h, aspect, terrain_y_hint,
-                                              terrain_map_min[0], terrain_map_min[1], terrain_map_max[0],
+            if(screen_to_world_xz_heightfield(&cam, (float)mx, (float)my, (float)fb_w, (float)fb_h, aspect,
+                                              terrain_y_hint, terrain_map_min[0], terrain_map_min[1], terrain_map_max[0],
                                               terrain_map_max[1], terrain_gui.freq, terrain_gui.noise_offset[0],
                                               terrain_gui.noise_offset[1], terrain_gui.height_scale, hover_xz))
             {
@@ -1711,7 +1734,7 @@ int main()
                 // Start drag: pick anchor point
                 vec2  anchor;
                 float terrain_y_hint = terrain_gui.height_scale * 0.5f;
-                if(screen_to_world_xz_heightfield(&cam, (float)mx, (float)my, (float)w, (float)h, aspect, terrain_y_hint,
+                if(screen_to_world_xz_heightfield(&cam, (float)mx, (float)my, (float)fb_w, (float)fb_h, aspect, terrain_y_hint,
                                                   terrain_map_min[0], terrain_map_min[1], terrain_map_max[0],
                                                   terrain_map_max[1], terrain_gui.freq, terrain_gui.noise_offset[0],
                                                   terrain_gui.noise_offset[1], terrain_gui.height_scale, anchor))
@@ -1824,29 +1847,9 @@ int main()
         {
             if(recreate)
             {
-                vk_swapchain_recreate(device, gpu, &swap, w, h, qf.graphics_queue, upload_pool);
-                ImGui_ImplVulkan_SetMinImageCount(swap.image_count);
-                destroy_depth_target(&allocator, &depth);
-                create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
-                recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
-                hdr.sampler = tonemap_sampler;
-                recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width,
-                                    swap.extent.height, &hdr_dof);
-                hdr_dof.sampler = tonemap_sampler;
-                for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
-                {
-                    RenderWrite dof_resize_writes[] = {
-                        RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-                        RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-                    };
-                    render_object_write_frame(&dof_obj, i, dof_resize_writes,
-                                              (uint32_t)(sizeof(dof_resize_writes) / sizeof(dof_resize_writes[0])));
-                }
-                RenderWrite tonemap_resize_writes[] = {
-                    RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-                };
-                render_object_write_static(&tonemap_obj, tonemap_resize_writes);
-                vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
+
+                swapchain_needs_recreate = true;
+
                 continue;
             }
         }
@@ -2355,31 +2358,7 @@ int main()
         {
             if(recreate)
             {
-
-                vk_swapchain_recreate(device, gpu, &swap, w, h, qf.graphics_queue, upload_pool);
-                ImGui_ImplVulkan_SetMinImageCount(swap.image_count);
-                destroy_depth_target(&allocator, &depth);
-                create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
-                recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
-                hdr.sampler = tonemap_sampler;
-                recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width,
-                                    swap.extent.height, &hdr_dof);
-                hdr_dof.sampler = tonemap_sampler;
-                for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
-                {
-                    RenderWrite dof_resize_writes[] = {
-                        RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-                        RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-                    };
-                    render_object_write_frame(&dof_obj, i, dof_resize_writes,
-                                              (uint32_t)(sizeof(dof_resize_writes) / sizeof(dof_resize_writes[0])));
-                }
-                RenderWrite tonemap_resize_writes[] = {
-                    RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-                };
-                render_object_write_static(&tonemap_obj, tonemap_resize_writes);
-                vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
-
+                swapchain_needs_recreate = true;
                 continue;
             }
         }
