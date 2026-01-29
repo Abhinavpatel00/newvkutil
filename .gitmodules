@@ -61,3 +61,6 @@
 [submodule "external/tracy"]
 	path = external/tracy
 	url = https://github.com/wolfpld/tracy.git
+[submodule "external/nob"]
+	path = external/nob
+	url = https://github.com/tsoding/nob.h.git
