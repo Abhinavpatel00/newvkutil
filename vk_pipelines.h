@@ -8,8 +8,112 @@
 #include <stdbool.h>
 #include <vulkan/vulkan_core.h>
 
+// Forward declaration for RenderObjectSpec (defined in render_object.h)
+typedef struct RenderObjectSpec RenderObjectSpec;
 
 
+
+
+
+typedef enum {
+    GLSL,
+    SLANG
+} ShaderType;
+
+typedef struct  {
+    const char* vert;
+    const char* frag;
+    const char* comp;
+    ShaderType  shader;
+} Shaderspec;
+
+// ============================================================================
+// Shader Program Descriptor Types (for Slang/GLSL compilation path)
+// ============================================================================
+
+typedef struct ShaderStageDesc {
+    const char*          file;   // Source file path (GLSL) or NULL for Slang
+    const char*          entry;  // Entry point name (e.g., "main", "vertexMain")
+    VkShaderStageFlagBits stage;  // VK_SHADER_STAGE_VERTEX_BIT, etc.
+} ShaderStageDesc;
+
+typedef struct ShaderProgram {
+    ShaderType       type;         // GLSL or SLANG
+    const char*      source;       // Slang: source file path; GLSL: NULL
+    ShaderStageDesc  stages[8];    // Stage descriptors
+    uint32_t         stage_count;  // Number of stages
+} ShaderProgram;
+
+typedef struct CompiledShaderStage {
+    VkShaderStageFlagBits stage;
+    const void*           code;   // SPIR-V bytecode (caller frees)
+    size_t                size;   // Size in bytes
+    char*                 entry;  // Entry point name (caller frees)
+} CompiledShaderStage;
+
+// Helper to create ShaderProgram from RenderObjectSpec
+static inline ShaderProgram shader_program_from_spec(const Shaderspec* spec)
+{
+    ShaderProgram prog ;
+    prog.type = spec->shader;
+    
+    if (spec->shader == SLANG) {
+        // For Slang, we use a single source file with multiple entry points
+        // Assume vert/frag specify the source file and entry point names
+        prog.source = spec->vert;  // Use vert path as the source file
+        
+        if (spec->vert) {
+            prog.stages[prog.stage_count].file = NULL;
+            prog.stages[prog.stage_count].entry = "vertexMain";
+            prog.stages[prog.stage_count].stage = VK_SHADER_STAGE_VERTEX_BIT;
+            prog.stage_count++;
+        }
+        if (spec->frag) {
+            prog.stages[prog.stage_count].file = NULL;
+            prog.stages[prog.stage_count].entry = "fragmentMain";
+            prog.stages[prog.stage_count].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            prog.stage_count++;
+        }
+        if (spec->comp) {
+            prog.source = spec->comp;
+            prog.stages[prog.stage_count].file = NULL;
+            prog.stages[prog.stage_count].entry = "computeMain";
+            prog.stages[prog.stage_count].stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            prog.stage_count++;
+        }
+    } else {
+        // GLSL: separate files per stage
+        prog.source = NULL;
+        
+        if (spec->vert) {
+            prog.stages[prog.stage_count].file = spec->vert;
+            prog.stages[prog.stage_count].entry = "main";
+            prog.stages[prog.stage_count].stage = VK_SHADER_STAGE_VERTEX_BIT;
+            prog.stage_count++;
+        }
+        if (spec->frag) {
+            prog.stages[prog.stage_count].file = spec->frag;
+            prog.stages[prog.stage_count].entry = "main";
+            prog.stages[prog.stage_count].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            prog.stage_count++;
+        }
+        if (spec->comp) {
+            prog.stages[prog.stage_count].file = spec->comp;
+            prog.stages[prog.stage_count].entry = "main";
+            prog.stages[prog.stage_count].stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            prog.stage_count++;
+        }
+    }
+    
+    return prog;
+}
+
+// Forward declaration of compile function (defined in vk_pipelines.c)
+bool compile_shader_program(
+    const ShaderProgram* prog,
+    CompiledShaderStage* out,
+    uint32_t*            out_count,
+    uint64_t*            out_stamp);
 
 typedef struct GraphicsPipelineKey
 {
@@ -97,6 +201,15 @@ VkPipeline create_graphics_pipeline(VkDevice                device,
                                     GraphicsPipelineConfig* config,
                                     VkPipelineLayout        forced_layout,
                                     VkPipelineLayout*       out_layout);
+
+VkPipeline create_graphics_pipeline_from_spec(VkDevice                device,
+                                              VkPipelineCache         cache,
+                                              DescriptorLayoutCache*  desc_cache,
+                                              PipelineLayoutCache*    pipe_cache,
+                                              const RenderObjectSpec* spec,
+                                              GraphicsPipelineConfig* config,
+                                              VkPipelineLayout        forced_layout,
+                                              VkPipelineLayout*       out_layout);
 
 
 void vk_cmd_set_viewport_scissor(VkCommandBuffer cmd, VkExtent2D extent);

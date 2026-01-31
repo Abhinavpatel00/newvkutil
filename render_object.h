@@ -13,7 +13,6 @@
 extern "C" {
 #endif
 
-// TODO:can we just integate this binding system to while declaing render object because it is ultmatel just shader data and declaring elsewhere makes less sense
 typedef uint64_t BindingId;
 
 typedef struct RenderBinding
@@ -61,14 +60,23 @@ typedef struct RenderWrite
     } data;
 } RenderWrite;
 
-#define RW_BUF(bind_name, buffer_handle, range) \
-    (RenderWrite){ .type = RENDER_WRITE_BUFFER, .name = (bind_name), .data.buf = { (buffer_handle), 0, (range) } }
+#define RW_BUF(bind_name, buffer_handle, range)                                                                        \
+    (RenderWrite)                                                                                                      \
+    {                                                                                                                  \
+        .type = RENDER_WRITE_BUFFER, .name = (bind_name), .data.buf = {(buffer_handle), 0, (range) }                   \
+    }
 
-#define RW_BUF_O(bind_name, buffer_handle, offset_bytes, range) \
-    (RenderWrite){ .type = RENDER_WRITE_BUFFER, .name = (bind_name), .data.buf = { (buffer_handle), (offset_bytes), (range) } }
+#define RW_BUF_O(bind_name, buffer_handle, offset_bytes, range)                                                        \
+    (RenderWrite)                                                                                                      \
+    {                                                                                                                  \
+        .type = RENDER_WRITE_BUFFER, .name = (bind_name), .data.buf = {(buffer_handle), (offset_bytes), (range) }      \
+    }
 
-#define RW_IMG(bind_name, image_view, image_sampler, image_layout) \
-    (RenderWrite){ .type = RENDER_WRITE_IMAGE, .name = (bind_name), .data.img = { (image_view), (image_sampler), (image_layout) } }
+#define RW_IMG(bind_name, image_view, image_sampler, image_layout)                                                     \
+    (RenderWrite)                                                                                                      \
+    {                                                                                                                  \
+        .type = RENDER_WRITE_IMAGE, .name = (bind_name), .data.img = {(image_view), (image_sampler), (image_layout) }  \
+    }
 
 typedef struct RenderWriteId
 {
@@ -94,21 +102,21 @@ typedef struct RenderWriteId
 typedef struct RenderWriteTable
 {
     uint32_t         count;
-    BindingId*       ids;     // size: count
-    RenderWriteType* types;   // size: count
+    BindingId*       ids;    // size: count
+    RenderWriteType* types;  // size: count
 
     VkBuffer*     buffers;  // size: count
     VkDeviceSize* offsets;  // size: count
     VkDeviceSize* ranges;   // size: count
 
-    VkImageView*   views;    // size: count
-    VkSampler*     samplers; // size: count
-    VkImageLayout* layouts;  // size: count
+    VkImageView*   views;     // size: count
+    VkSampler*     samplers;  // size: count
+    VkImageLayout* layouts;   // size: count
 } RenderWriteTable;
 
 typedef struct RenderWriteList
 {
-    RenderWriteId* writes; // stb_ds dynamic array
+    RenderWriteId* writes;  // stb_ds dynamic array
 } RenderWriteList;
 
 // ------------------------------------------------------------
@@ -117,21 +125,20 @@ typedef struct RenderWriteList
 
 typedef struct RenderObjectSpec
 {
-    // Shaders (SPIR-V paths)
     const char* vert_spv;
-    const char* frag_spv; // optional for graphics
-    const char* comp_spv; // optional for compute
-
+    const char* frag_spv;  // optional for graphics
+    const char* comp_spv;  // optional for compute
+    ShaderType  shader;
     // Fixed-function hints
     VkPrimitiveTopology topology;
     VkCullModeFlags     cull_mode;
     VkFrontFace         front_face;
     VkCompareOp         depth_compare;
-    bool            depth_test;
-    bool            depth_write;
+    bool                depth_test;
+    bool                depth_write;
     VkPolygonMode       polygon_mode;
-    bool           blend_enable;
-    bool            use_vertex_input;
+    bool                blend_enable;
+    bool                use_vertex_input;
 
     // Dynamic rendering formats
     uint32_t        color_attachment_count;
@@ -140,49 +147,50 @@ typedef struct RenderObjectSpec
     VkFormat        stencil_format;
 
     // Descriptor behavior
-    bool allow_update_after_bind;
-    bool use_bindless_if_available;
-    bool per_frame_sets;
+    bool     allow_update_after_bind;
+    bool     use_bindless_if_available;
+    bool     per_frame_sets;
     uint32_t bindless_descriptor_count;
-    bool reloadable;
+    bool     reloadable;
 
     // Dynamic states (optional)
     uint32_t              dynamic_state_count;
     const VkDynamicState* dynamic_states;
 
     // Specialization constants (optional)
-    uint32_t                       spec_constant_count;
+    uint32_t                        spec_constant_count;
     const VkSpecializationMapEntry* spec_map;
     const void*                     spec_data;
-    uint32_t                         spec_data_size;
+    uint32_t                        spec_data_size;
 } RenderObjectSpec;
 
 static inline RenderObjectSpec render_object_spec_default(void)
 {
     return (RenderObjectSpec){
-        .topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        .cull_mode              = VK_CULL_MODE_NONE,
-        .front_face             = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-        .depth_compare          = VK_COMPARE_OP_GREATER_OR_EQUAL,
-        .depth_test             = VK_FALSE,
-        .depth_write            = VK_FALSE,
-        .polygon_mode           = VK_POLYGON_MODE_FILL,
-        .blend_enable           = VK_TRUE,
-        .use_vertex_input       = true,
-        .color_formats          = NULL,
-        .depth_format           = VK_FORMAT_UNDEFINED,
-        .stencil_format         = VK_FORMAT_UNDEFINED,
-        .allow_update_after_bind    = VK_FALSE,
-        .use_bindless_if_available  = VK_FALSE,
-        .per_frame_sets             = VK_FALSE,
-        .bindless_descriptor_count  = 0,
-        .reloadable                 = VK_FALSE,
-        .dynamic_state_count        = 0,
-        .dynamic_states             = NULL,
-        .spec_constant_count        = 0,
-        .spec_map                   = NULL,
-        .spec_data                  = NULL,
-        .spec_data_size             = 0,
+        .topology                  = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .cull_mode                 = VK_CULL_MODE_NONE,
+        .shader                    = GLSL,
+        .front_face                = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depth_compare             = VK_COMPARE_OP_GREATER_OR_EQUAL,
+        .depth_test                = VK_FALSE,
+        .depth_write               = VK_FALSE,
+        .polygon_mode              = VK_POLYGON_MODE_FILL,
+        .blend_enable              = VK_TRUE,
+        .use_vertex_input          = true,
+        .color_formats             = NULL,
+        .depth_format              = VK_FORMAT_UNDEFINED,
+        .stencil_format            = VK_FORMAT_UNDEFINED,
+        .allow_update_after_bind   = VK_FALSE,
+        .use_bindless_if_available = VK_FALSE,
+        .per_frame_sets            = VK_FALSE,
+        .bindless_descriptor_count = 0,
+        .reloadable                = VK_FALSE,
+        .dynamic_state_count       = 0,
+        .dynamic_states            = NULL,
+        .spec_constant_count       = 0,
+        .spec_map                  = NULL,
+        .spec_data                 = NULL,
+        .spec_data_size            = 0,
     };
 }
 
@@ -194,38 +202,38 @@ RenderObjectSpec render_object_spec_from_config(const GraphicsPipelineConfig* cf
 
 typedef enum RenderBindingUsage
 {
-    RENDER_BIND_STATIC        = 0,
-    RENDER_BIND_PER_FRAME     = 1 << 0,
-    RENDER_BIND_SWAPCHAIN     = 1 << 1,
-    RENDER_BIND_UPDATE_AFTER  = 1 << 2,
-    RENDER_BIND_BINDLESS      = 1 << 3,
+    RENDER_BIND_STATIC       = 0,
+    RENDER_BIND_PER_FRAME    = 1 << 0,
+    RENDER_BIND_SWAPCHAIN    = 1 << 1,
+    RENDER_BIND_UPDATE_AFTER = 1 << 2,
+    RENDER_BIND_BINDLESS     = 1 << 3,
 } RenderBindingUsage;
 
 
 typedef struct RenderBindingInfo
 {
-    const char*               name;
-    BindingId                 id;
-    uint32_t                  set;
-    uint32_t                  binding;
-    VkDescriptorType          descriptor_type;
-    uint32_t                  descriptor_count;
-    VkShaderStageFlags        stage_flags;
-    VkDescriptorBindingFlags  binding_flags;
+    const char*              name;
+    BindingId                id;
+    uint32_t                 set;
+    uint32_t                 binding;
+    VkDescriptorType         descriptor_type;
+    uint32_t                 descriptor_count;
+    VkShaderStageFlags       stage_flags;
+    VkDescriptorBindingFlags binding_flags;
 
-    RenderBindingUsage usage; // <-- THIS
+    RenderBindingUsage usage;  // <-- THIS
 } RenderBindingInfo;
 
 typedef struct RenderObjectReflection
 {
     uint32_t           set_count;
-    RenderBindingInfo* bindings; // stb_ds dynamic array
+    RenderBindingInfo* bindings;  // stb_ds dynamic array
     uint32_t           binding_count;
 
     uint32_t            push_constant_count;
     VkPushConstantRange push_constants[SHADER_REFLECT_MAX_PUSH];
     uint32_t            push_constant_size;
-    VkShaderStageFlags  push_constant_stages; // cached OR of all push constant stage flags
+    VkShaderStageFlags  push_constant_stages;  // cached OR of all push constant stage flags
 
     VkBool32 per_frame_hint;
 } RenderObjectReflection;
@@ -236,27 +244,27 @@ typedef struct RenderObjectReflection
 
 typedef struct RenderPipeline
 {
-    VkDevice          device;
-    VkPipeline        pipeline;
-    VkPipelineLayout  layout;
+    VkDevice               device;
+    VkPipeline             pipeline;
+    VkPipelineLayout       layout;
     VkDescriptorSetLayout* set_layouts;
-    uint32_t          set_count;
-    VkPipelineBindPoint bind_point;
+    uint32_t               set_count;
+    VkPipelineBindPoint    bind_point;
 
     VkDescriptorSetLayoutCreateFlags set_create_flags[SHADER_REFLECT_MAX_SETS];
-    uint32_t          variable_descriptor_counts[SHADER_REFLECT_MAX_SETS];
-    RenderObjectReflection refl;
+    uint32_t                         variable_descriptor_counts[SHADER_REFLECT_MAX_SETS];
+    RenderObjectReflection           refl;
 } RenderPipeline;
 
 typedef struct RenderResources
 {
-    VkDescriptorSet* sets;
-    uint32_t         set_count;
-    uint32_t         frames_in_flight;
-    VkBool32         per_frame_sets;
-    bool             owns_sets;
-    uint32_t         external_set_mask;
-    BindingWriteState* written; // stb_ds hash set by BindingId
+    VkDescriptorSet*     sets;
+    uint32_t             set_count;
+    uint32_t             frames_in_flight;
+    VkBool32             per_frame_sets;
+    bool                 owns_sets;
+    uint32_t             external_set_mask;
+    BindingWriteState*   written;  // stb_ds hash set by BindingId
     DescriptorAllocator* allocator;
     VkDevice             device;
     VkBool32             allocated;
@@ -280,40 +288,40 @@ typedef struct RenderObject
 // API
 // ------------------------------------------------------------
 
-void render_object_create(RenderObject*           obj,
-                           VkPipelineCache        pipeline_cache,
-                           DescriptorLayoutCache* desc_cache,
-                           PipelineLayoutCache*   pipe_cache,
-                           DescriptorAllocator*   alloc,
-                           const RenderObjectSpec* spec,
-                           uint32_t                frames_in_flight);
+void      render_object_create(RenderObject*           obj,
+                               VkPipelineCache         pipeline_cache,
+                               DescriptorLayoutCache*  desc_cache,
+                               PipelineLayoutCache*    pipe_cache,
+                               DescriptorAllocator*    alloc,
+                               const RenderObjectSpec* spec,
+                               uint32_t                frames_in_flight);
 BindingId render_bind_id(const char* name);
 
 RenderBinding render_object_get_binding(const RenderObject* obj, const char* name);
 
 RenderWriteList render_write_list_begin(void);
-void render_write_list_reset(RenderWriteList* list);
-void render_write_list_free(RenderWriteList* list);
-uint32_t render_write_list_count(const RenderWriteList* list);
+void            render_write_list_reset(RenderWriteList* list);
+void            render_write_list_free(RenderWriteList* list);
+uint32_t        render_write_list_count(const RenderWriteList* list);
 void render_write_list_buffer(RenderWriteList* list, RenderBinding binding, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
 void render_write_list_image(RenderWriteList* list, RenderBinding binding, VkImageView view, VkSampler sampler, VkImageLayout layout);
 
-RenderPipeline render_pipeline_create(VkDevice               device,
-                                     VkPipelineCache        pipeline_cache,
-                                     DescriptorLayoutCache* desc_cache,
-                                     PipelineLayoutCache*   pipe_cache,
-                                     const RenderObjectSpec* spec);
+RenderPipeline render_pipeline_create(VkDevice                device,
+                                      VkPipelineCache         pipeline_cache,
+                                      DescriptorLayoutCache*  desc_cache,
+                                      PipelineLayoutCache*    pipe_cache,
+                                      const RenderObjectSpec* spec);
 
 // Shader hot reload (no-op unless any reloadable pipelines are registered)
 void render_pipeline_hot_reload_update(void);
 
 void render_pipeline_destroy(VkDevice device, RenderPipeline* pipe);
 
-RenderResources render_resources_alloc(VkDevice                   device,
-                                       const RenderPipeline*      pipe,
-                                       DescriptorAllocator*       alloc,
-                                       uint32_t                   frames_in_flight,
-                                       VkBool32                   per_frame_sets);
+RenderResources render_resources_alloc(VkDevice              device,
+                                       const RenderPipeline* pipe,
+                                       DescriptorAllocator*  alloc,
+                                       uint32_t              frames_in_flight,
+                                       VkBool32              per_frame_sets);
 
 RenderResources render_resources_external(uint32_t set_count, const VkDescriptorSet* sets);
 
@@ -323,10 +331,7 @@ void render_object_set_external_set(RenderObject* obj, const char* binding_name,
 
 void render_resources_destroy(RenderResources* res);
 
-void render_resources_write_all(RenderResources* res,
-                                const RenderPipeline* pipe,
-                                const RenderWriteTable* table,
-                                uint32_t frame_index);
+void render_resources_write_all(RenderResources* res, const RenderPipeline* pipe, const RenderWriteTable* table, uint32_t frame_index);
 
 
 // Enable hot-reload for this object. MUST be called AFTER the object is stored
@@ -335,51 +340,31 @@ void render_object_enable_hot_reload(RenderObject* obj, VkPipelineCache pipeline
 
 void render_object_destroy(VkDevice device, RenderObject* obj);
 
-void render_object_write_buffer(RenderObject*   obj,
-                                const char*     name,
-                                uint32_t        set,
-                                uint32_t        binding,
-                                VkBuffer        buffer,
-                                VkDeviceSize    offset,
-                                VkDeviceSize    range,
-                                uint32_t        frame_index);
+void render_object_write_buffer(RenderObject* obj,
+                                const char*   name,
+                                uint32_t      set,
+                                uint32_t      binding,
+                                VkBuffer      buffer,
+                                VkDeviceSize  offset,
+                                VkDeviceSize  range,
+                                uint32_t      frame_index);
 
-void render_object_write_buffer_id(RenderObject*   obj,
-                                   BindingId       id,
-                                   VkBuffer        buffer,
-                                   VkDeviceSize    offset,
-                                   VkDeviceSize    range,
-                                   uint32_t        frame_index);
+void render_object_write_buffer_id(RenderObject* obj, BindingId id, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range, uint32_t frame_index);
 
-void render_object_write_buffer_binding(RenderObject*   obj,
-                                        RenderBinding   binding,
-                                        VkBuffer        buffer,
-                                        VkDeviceSize    offset,
-                                        VkDeviceSize    range,
-                                        uint32_t        frame_index);
+void render_object_write_buffer_binding(RenderObject* obj, RenderBinding binding, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range, uint32_t frame_index);
 
-void render_object_write_image(RenderObject*   obj,
-                               const char*     name,
-                               uint32_t        set,
-                               uint32_t        binding,
-                               VkImageView     view,
-                               VkSampler       sampler,
-                               VkImageLayout   layout,
-                               uint32_t        frame_index);
+void render_object_write_image(RenderObject* obj,
+                               const char*   name,
+                               uint32_t      set,
+                               uint32_t      binding,
+                               VkImageView   view,
+                               VkSampler     sampler,
+                               VkImageLayout layout,
+                               uint32_t      frame_index);
 
-void render_object_write_image_id(RenderObject*   obj,
-                                  BindingId       id,
-                                  VkImageView     view,
-                                  VkSampler       sampler,
-                                  VkImageLayout   layout,
-                                  uint32_t        frame_index);
+void render_object_write_image_id(RenderObject* obj, BindingId id, VkImageView view, VkSampler sampler, VkImageLayout layout, uint32_t frame_index);
 
-void render_object_write_image_binding(RenderObject*   obj,
-                                       RenderBinding   binding,
-                                       VkImageView     view,
-                                       VkSampler       sampler,
-                                       VkImageLayout   layout,
-                                       uint32_t        frame_index);
+void render_object_write_image_binding(RenderObject* obj, RenderBinding binding, VkImageView view, VkSampler sampler, VkImageLayout layout, uint32_t frame_index);
 
 void render_object_write_all(RenderObject* obj, const RenderWrite* writes, uint32_t write_count, uint32_t frame_index);
 
@@ -397,9 +382,8 @@ void render_object_write_frame_list(RenderObject* obj, uint32_t frame_index, con
 
 void render_object_write_static_impl(RenderObject* obj, const RenderWrite* writes, uint32_t write_count);
 
-#define render_object_write_static(obj, writes_array) \
-    render_object_write_static_impl((obj), (writes_array), \
-        (uint32_t)(sizeof(writes_array) / sizeof((writes_array)[0])))
+#define render_object_write_static(obj, writes_array)                                                                  \
+    render_object_write_static_impl((obj), (writes_array), (uint32_t)(sizeof(writes_array) / sizeof((writes_array)[0])))
 void render_object_write_static_ids(RenderObject* obj, const RenderWriteId* writes, uint32_t write_count);
 
 void render_object_write_frame(RenderObject* obj, uint32_t frame_index, const RenderWrite* writes, uint32_t write_count);
@@ -411,15 +395,9 @@ bool render_object_validate_ready(const RenderObject* obj);
 // Performance: Call at start of command buffer to reset state tracking cache
 void render_reset_state(void);
 
-void render_object_bind(VkCommandBuffer cmd,
-                        const RenderObject* obj,
-                        VkPipelineBindPoint bind_point,
-                        uint32_t frame_index);
+void render_object_bind(VkCommandBuffer cmd, const RenderObject* obj, VkPipelineBindPoint bind_point, uint32_t frame_index);
 
-void render_object_push_constants(VkCommandBuffer cmd,
-                                  const RenderObject* obj,
-                                  const void* data,
-                                  uint32_t size);
+void render_object_push_constants(VkCommandBuffer cmd, const RenderObject* obj, const void* data, uint32_t size);
 
 
 void render_instance_create(RenderObjectInstance* inst, RenderPipeline* pipe, RenderResources* res);

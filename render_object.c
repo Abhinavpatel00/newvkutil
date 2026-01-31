@@ -53,7 +53,6 @@ static const RenderBindingInfo* render_find_binding_by_name(const RenderObjectRe
 static const RenderBindingInfo* render_find_binding_by_set_binding(const RenderObjectReflection* refl, uint32_t set, uint32_t binding);
 
 
-
 static VkShaderModule create_shader_module(VkDevice device, const void* code, size_t size)
 {
     VkShaderModuleCreateInfo ci = {
@@ -95,6 +94,7 @@ typedef struct RenderPipelineHotReloadEntry
     VkPipeline       pipeline_handle;
     bool             warned_handle_mismatch;
     RenderObjectSpec spec;
+    ShaderType       shader;
     char*            vert_path;
     char*            frag_path;
     char*            comp_path;

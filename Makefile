@@ -18,7 +18,9 @@ SRC_CPP := tracy.cpp vma.cpp $(wildcard external/meshoptimizer/src/*.cpp) \
            external/cimgui/imgui/imgui_demo.cpp external/cimgui/imgui/imgui_tables.cpp \
            external/cimgui/imgui/imgui_widgets.cpp \
            external/cimgui/imgui/backends/imgui_impl_glfw.cpp \
-           external/cimgui/imgui/backends/imgui_impl_vulkan.cpp
+           external/cimgui/imgui/backends/imgui_impl_glfw.cpp \
+           external/cimgui/imgui/backends/imgui_impl_vulkan.cpp \
+           vk_slang_bridge.cpp
 
 # =========================
 # Common flags
@@ -30,7 +32,8 @@ COMMON_CXXFLAGS := -std=c++17 -w -fno-common \
                    -Iexternal/cimgui -Iexternal/cimgui/imgui \
                    -Iexternal/cimgui/imgui/backends
 
-LIBS := -lvulkan -lm -lglfw -lX11 -lXi -lXrandr -lXcursor -lXinerama -ldl -lpthread
+SLANG_LIB_PATH := /home/lk/.local/share/nvim/mason/packages/slang/lib
+LIBS := -lvulkan -lm -lglfw -lX11 -lXi -lXrandr -lXcursor -lXinerama -ldl -lpthread -L$(SLANG_LIB_PATH) -Wl,-rpath,$(SLANG_LIB_PATH) -lslang
 
 # =========================
 # Debug flags (default)

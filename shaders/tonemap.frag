@@ -29,7 +29,7 @@ void main()
     vec3 ldr = filmic(hdr);
 
     // gamma
-    ldr = pow(ldr, vec3(1.0 / pc.gamma));
+    ldr = pow(ldr, vec3(4.0 / pc.gamma));
 
     outColor = vec4(ldr, 1.0);
 }

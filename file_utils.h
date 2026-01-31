@@ -1,3 +1,4 @@
+#include <sys/stat.h>
 #include "tinytypes.h"
 static bool file_exists(const char* path)
 {

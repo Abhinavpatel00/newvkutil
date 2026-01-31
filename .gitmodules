@@ -64,3 +64,6 @@
 [submodule "external/nob"]
 	path = external/nob
 	url = https://github.com/tsoding/nob.h.git
+[submodule "shadercomp/slang"]
+	path = shadercomp/slang
+	url = https://github.com/shader-slang/slang
