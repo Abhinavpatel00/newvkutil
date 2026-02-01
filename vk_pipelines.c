@@ -244,6 +244,47 @@ static bool compile_glsl_to_spv(const char* src_path, const char* spv_path)
     return true;
 }
 
+static bool compile_slang_to_spv(const char* src_path, const char* spv_path, const char* entry)
+{
+    if(!src_path || !spv_path || !entry)
+        return false;
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "/opt/shader-slang-bin/bin/slangc \"%s\" -o \"%s\" -target spirv -entry \"%s\" 2> compiledshaders/shader_errors.txt",
+             src_path, spv_path, entry);
+
+    int r = system(cmd);
+    if(r != 0)
+    {
+        log_error("slangc failed: %s -> %s (entry=%s)", src_path, spv_path, entry);
+
+        FILE* f = fopen("compiledshaders/shader_errors.txt", "rb");
+        if(f)
+        {
+            fseek(f, 0, SEEK_END);
+            long len = ftell(f);
+            rewind(f);
+
+            if(len > 0)
+            {
+                char* msg = (char*)malloc((size_t)len + 1);
+                if(msg)
+                {
+                    fread(msg, 1, (size_t)len, f);
+                    msg[len] = 0;
+                    log_error("Slang compile log:\n%s", msg);
+                    free(msg);
+                }
+            }
+            fclose(f);
+        }
+
+        return false;
+    }
+
+    return true;
+}
+
 static bool compile_glsl_program(const ShaderProgram* prog, CompiledShaderStage* out, uint32_t* out_count, uint64_t* out_stamp)
 {
     *out_count = 0;
@@ -305,18 +346,27 @@ static bool compile_slang_program(const ShaderProgram* prog, CompiledShaderStage
     {
         const ShaderStageDesc* stage = &prog->stages[i];
         
-        void* spv = NULL;
-        size_t size = 0;
-        
-        if (!vk_compile_slang(prog->source, stage->entry, stage->stage, &spv, &size))
-        {
-            log_error("Failed to compile slang shader: %s : %s", prog->source, stage->entry);
-            // Free any previous stages? Caller handles?
+        char spv_path[1024];
+        const char* base = strrchr(prog->source, '/');
+        base = base ? base + 1 : prog->source;
+
+        const char* ext = "";
+        if (stage->stage == VK_SHADER_STAGE_VERTEX_BIT) ext = "vert";
+        else if (stage->stage == VK_SHADER_STAGE_FRAGMENT_BIT) ext = "frag";
+        else if (stage->stage == VK_SHADER_STAGE_COMPUTE_BIT) ext = "comp";
+
+        snprintf(spv_path, sizeof(spv_path), "compiledshaders/%s.%s.spv", base, ext);
+
+        if(!compile_slang_to_spv(prog->source, spv_path, stage->entry))
             return false;
-        }
+
+        void* code = NULL;
+        size_t size = 0;
+        if(!read_file(spv_path, &code, &size))
+            return false;
 
         out[*out_count].stage = stage->stage;
-        out[*out_count].code = spv;
+        out[*out_count].code = code;
         out[*out_count].size = size;
         out[*out_count].entry = str_dup(stage->entry);
         (*out_count)++;

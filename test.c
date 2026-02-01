@@ -338,15 +338,34 @@ typedef struct ToonPC
     vec4 params3;              // x=isFace, y=outlineZOffsetRemapStart, z=outlineZOffsetRemapEnd, w=unused
 } ToonPC;
 
-typedef struct DOFPC
+typedef struct PostProcessParams
 {
+    float resolution[2];
+    float time;
+    float exposure;
 
-    float focal_distance;  // meters
-    float focal_length;    // meters (50mm = 0.05f)
-    float coc_scale;       // f^2 / (sensor_height * f_stop)
-    float max_coc_px;      // pixels
-    float z_near;          // camera near
-} DOFPC;
+    float shadows[3];
+    float shadowWeight;
+    float midtones[3];
+    float midtoneWeight;
+    float highlights[3];
+    float highlightWeight;
+
+    float saturation;
+    float contrast;
+    float brightness;
+
+    float vignetteIntensity;
+    float vignetteRadius;
+    float vignetteSoftness;
+
+    float grainIntensity;
+    float grainSize;
+
+    float sharpenStrength;
+    float chromaticAberrationStrength;
+    float gamma;
+} PostProcessParams;
 
 
 static const Vertex TRIANGLE_VERTS[] = {
@@ -637,8 +656,7 @@ int main()
     RenderObject water_obj         = {0};
     RenderObject cull_obj          = {0};
     RenderObject terrain_paint_obj = {0};
-    RenderObject dof_obj           = {0};
-    RenderObject tonemap_obj       = {0};
+    RenderObject postprocess_obj   = {0};
 
     RenderObjectInstance toon_inst          = {0};
     RenderObjectInstance toon_outline_inst  = {0};
@@ -649,8 +667,7 @@ int main()
     RenderObjectInstance cull_inst          = {0};
     RenderObjectInstance terrain_paint_inst = {0};
     RenderObjectInstance raymarch_inst      = {0};
-    RenderObjectInstance dof_inst           = {0};
-    RenderObjectInstance tonemap_inst       = {0};
+    RenderObjectInstance postprocess_inst   = {0};
 
     RenderObjectSpec tri_spec          = render_object_spec_from_config(&cfg);
     tri_spec.vert_spv                  = "compiledshaders/tri.vert.spv";
@@ -748,28 +765,15 @@ int main()
     render_object_set_external_set(&water_obj, "u_textures", bindless.set);
     render_instance_create(&water_ro_inst, &water_obj.pipeline, &water_obj.resources);
 
-    RenderObjectSpec dof_spec       = render_object_spec_from_config(&cfg);
-    dof_spec.vert_spv               = "compiledshaders/dof.vert.spv";
-    dof_spec.frag_spv               = "compiledshaders/dof.frag.spv";
-    dof_spec.color_attachment_count = 1;
-    dof_spec.color_formats          = &hdr_format;
-    dof_spec.depth_test             = VK_FALSE;
-    dof_spec.depth_write            = VK_FALSE;
-    dof_spec.blend_enable           = VK_FALSE;
-    dof_spec.per_frame_sets         = VK_TRUE;
+    RenderObjectSpec postprocess_spec = render_object_spec_default();
+    postprocess_spec.comp_spv         = "shaders/postprocess.slang";
+    postprocess_spec.shader           = SLANG;
+    postprocess_spec.per_frame_sets   = VK_TRUE;
+    postprocess_spec.reloadable       = VK_TRUE;
 
-    render_object_create(&dof_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &dof_spec, MAX_FRAME_IN_FLIGHT);
-    render_instance_create(&dof_inst, &dof_obj.pipeline, &dof_obj.resources);
-
-    RenderObjectSpec tonemap_spec       = render_object_spec_from_config(&cfg);
-    tonemap_spec.vert_spv               = "compiledshaders/tonemap.vert.spv";
-    tonemap_spec.frag_spv               = "compiledshaders/tonemap.frag.spv";
-    tonemap_spec.color_attachment_count = 1;
-    tonemap_spec.color_formats          = &swap.format;
-
-    render_object_create(&tonemap_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &tonemap_spec, 1);
-
-    render_instance_create(&tonemap_inst, &tonemap_obj.pipeline, &tonemap_obj.resources);
+    render_object_create(&postprocess_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &postprocess_spec,
+                         MAX_FRAME_IN_FLIGHT);
+    render_instance_create(&postprocess_inst, &postprocess_obj.pipeline, &postprocess_obj.resources);
     BufferArena host_arena         = {0};
     BufferArena device_arena       = {0};
     BufferSlice global_ubo_buf     = {0};
@@ -801,8 +805,6 @@ int main()
     // HDR color target for tone mapping
     Image hdr = {0};
 
-    // HDR color target for DOF output
-    Image hdr_dof = {0};
 
     VkSampler heightmap_sampler = VK_NULL_HANDLE;
 
@@ -894,8 +896,6 @@ int main()
     recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, hdr_width, hdr_height, &hdr);
     hdr.sampler = tonemap_sampler;
 
-    recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, hdr_width, hdr_height, &hdr_dof);
-    hdr_dof.sampler = tonemap_sampler;
 
     // Calculate terrain bounds early (needed for CPU bake)
     float terrain_half_init    = ((float)TERRAIN_GRID - 1.0f) * TERRAIN_CELL * 0.5f;
@@ -1358,22 +1358,7 @@ int main()
     };
     render_object_write_static(&raymarch_obj, raymarch_writes);
 
-    for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
-    {
-        RenderWrite dof_writes[] = {
-            RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-            RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-        };
-        render_object_write_frame(&dof_obj, i, dof_writes, ARRAY_COUNT(dof_writes));
-    }
-
-
-    RenderWrite tonemap_writes[] = {
-        RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-    };
-    render_object_write_static(&tonemap_obj, tonemap_writes);
-
-
+    // Postprocess bindings are written per-frame with the swapchain image.
     Camera cam = {0};
     camera_init(&cam);
     // Start above the terrain so we're not under a strictly-positive heightfield.
@@ -1519,21 +1504,7 @@ swapchain_needs_recreate |=
             create_depth_target(&allocator, &depth, swap.extent.width, swap.extent.height, depth_format);
             recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
             hdr.sampler = tonemap_sampler;
-            recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr_dof);
-            hdr_dof.sampler = tonemap_sampler;
-            for(uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++)
-            {
-                RenderWrite dof_resize_writes[] = {
-                    RW_IMG("uColor", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-                    RW_IMG("uDepth", depth.view[i], tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-                };
-                render_object_write_frame(&dof_obj, i, dof_resize_writes,
-                                          (uint32_t)(sizeof(dof_resize_writes) / sizeof(dof_resize_writes[0])));
-            }
-            RenderWrite tonemap_resize_writes[] = {
-                RW_IMG("uColor", hdr_dof.view, hdr_dof.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
-            };
-            render_object_write_static(&tonemap_obj, tonemap_resize_writes);
+            // Postprocess writes are updated per-frame with the swapchain image.
             vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
             g_framebuffer_resized = false;
             igRender();
@@ -2183,106 +2154,66 @@ swapchain_needs_recreate |=
         //         vkCmdEndRendering(cmd);
 
 
-        image_transition(cmd, &hdr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        image_transition(cmd, &hdr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
-        IMAGE_BARRIER_IMMEDIATE(cmd, depth.image[current_frame], depth.layout[current_frame],
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .src_stage = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                                .dst_stage  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                .src_access = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                                .dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, .aspect = VK_IMAGE_ASPECT_DEPTH_BIT);
-        depth.layout[current_frame] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_GENERAL,
+                                .src_stage = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                                .dst_stage = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                .src_access = 0,
+                                .dst_access = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-        if(hdr_dof.state.layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-            image_to_color(cmd, &hdr_dof);
-
-        // -------------------------------------------------
-        // DOF pass: HDR + Depth → HDR_DOF
-        // -------------------------------------------------
-        VkRenderingAttachmentInfo dof_color = {
-            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView   = hdr_dof.view,
-            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-            .clearValue  = {.color = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}}},
-        };
-
-        VkRenderingInfo dof_rendering = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-                                         .renderArea = {.offset = {0, 0}, .extent = {swap.extent.width, swap.extent.height}},
-                                         .layerCount           = 1,
-                                         .colorAttachmentCount = 1,
-                                         .pColorAttachments    = &dof_color,
-                                         .pDepthAttachment     = NULL};
-
-        vk_cmd_set_viewport_scissor(cmd, swap.extent);
-        vkCmdBeginRendering(cmd, &dof_rendering);
-        GPU_SCOPE(cmd, P, "dof", VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
+        GPU_SCOPE(cmd, P, "postprocess", VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
         {
-            render_instance_bind(cmd, &dof_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
+            RenderWrite pp_writes[] = {
+                RW_IMG("inputImage", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+                RW_IMG("outputImage", swap.image_views[image_index], VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL),
+                RW_IMG("linearSampler", VK_NULL_HANDLE, tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+            };
+            render_object_write_frame(&postprocess_obj, current_frame, pp_writes, ARRAY_COUNT(pp_writes));
 
-            DOFPC dof_pc = {
+            PostProcessParams pp_params = {
+                .resolution = {(float)swap.extent.width, (float)swap.extent.height},
+                .time       = (float)glfwGetTime(),
+                .exposure   = 1.0f,
 
-                .focal_distance = 1.0f,   // meters: good for outdoor / terrain scenes
-                .focal_length   = 0.05f,  // 50mm: human-eye-ish, neutral perspective
-                .coc_scale      = 0.0f,   // computed, not hardcoded (see below)
-                .max_coc_px     = 8.0f,   // pixels: strong but not stupid
-                .z_near         = cam.znear,
+                .shadows        = {0.0f, 0.0f, 0.0f},
+                .shadowWeight   = 0.0f,
+                .midtones       = {1.0f, 1.0f, 1.0f},
+                .midtoneWeight  = 0.0f,
+                .highlights     = {0.0f, 0.0f, 0.0f},
+                .highlightWeight = 0.0f,
+
+                .saturation = 1.0f,
+                .contrast   = 1.0f,
+                .brightness = 0.0f,
+
+                .vignetteIntensity = 0.2f,
+                .vignetteRadius    = 0.5f,
+                .vignetteSoftness  = 0.4f,
+
+                .grainIntensity = 0.04f,
+                .grainSize      = 240.0f,
+
+                .sharpenStrength             = 0.25f,
+                .chromaticAberrationStrength = 0.05f,
+                .gamma                       = 2.2f,
             };
 
-            float sensor_height = 0.024f;  // 24mm full-frame
-            float f_stop        = 2.8f;    // cinematic but not clownish
+            render_instance_bind(cmd, &postprocess_inst, VK_PIPELINE_BIND_POINT_COMPUTE, current_frame);
+            render_instance_set_push_data(&postprocess_inst, &pp_params, sizeof(pp_params));
+            render_instance_push(cmd, &postprocess_inst);
 
-            dof_pc.coc_scale = (dof_pc.focal_length * dof_pc.focal_length) / (sensor_height * f_stop);
-            render_instance_set_push_data(&dof_inst, &dof_pc, sizeof(dof_pc));
-            render_instance_push(cmd, &dof_inst);
-
-            vkCmdDraw(cmd, 3, 1, 0, 0);
+            uint32_t gx = (swap.extent.width + 7) / 8;
+            uint32_t gy = (swap.extent.height + 7) / 8;
+            vkCmdDispatch(cmd, gx, gy, 1);
         }
-        vkCmdEndRendering(cmd);
 
-        image_transition(cmd, &hdr_dof, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        // -------------------------------------------------
-        // Tone mapping pass: HDR → swapchain
-        // -------------------------------------------------
-
-        // Transition swapchain for color output
-        IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-
-        VkRenderingAttachmentInfo tonemap_color = {
-            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView   = swap.image_views[image_index],
-            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-        };
-
-        VkRenderingInfo tonemap_rendering = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-                                             .renderArea = {.offset = {0, 0}, .extent = {swap.extent.width, swap.extent.height}},
-                                             .layerCount           = 1,
-                                             .colorAttachmentCount = 1,
-                                             .pColorAttachments    = &tonemap_color,
-                                             .pDepthAttachment     = NULL};
-
-        vk_cmd_set_viewport_scissor(cmd, swap.extent);
-        vkCmdBeginRendering(cmd, &tonemap_rendering);
-
-        render_instance_bind(cmd, &tonemap_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
-
-        struct
-        {
-            float exposure;
-            float gamma;
-        } tonemap_pc = {.exposure = 1.0f, .gamma = 2.2f};
-
-        render_instance_set_push_data(&tonemap_inst, &tonemap_pc, sizeof(tonemap_pc));
-        render_instance_push(cmd, &tonemap_inst);
-
-        // fullscreen triangle
-        vkCmdDraw(cmd, 3, 1, 0, 0);
-
-        vkCmdEndRendering(cmd);
+        IMAGE_BARRIER_IMMEDIATE(cmd, swap.images[image_index], VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                .src_stage = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                .dst_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                .src_access = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                .dst_access = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 
         VkRenderingAttachmentInfo imgui_color = {
 
@@ -2418,10 +2349,6 @@ swapchain_needs_recreate |=
         vkDestroyImageView(device, hdr.view, NULL);
     if(hdr.image)
         res_destroy_image(&allocator, hdr.image, hdr.allocation);
-    if(hdr_dof.view)
-        vkDestroyImageView(device, hdr_dof.view, NULL);
-    if(hdr_dof.image)
-        res_destroy_image(&allocator, hdr_dof.image, hdr_dof.allocation);
     if(base_height.view)
         vkDestroyImageView(device, base_height.view, NULL);
     if(base_height.image)
@@ -2469,7 +2396,7 @@ swapchain_needs_recreate |=
     render_object_destroy(device, &water_obj);
     render_object_destroy(device, &cull_obj);
     render_object_destroy(device, &terrain_paint_obj);
-    render_object_destroy(device, &dof_obj);
+    render_object_destroy(device, &postprocess_obj);
     vkDestroySurfaceKHR(ctx.instance, surface, NULL);
     vkDestroyDevice(device, NULL);
 

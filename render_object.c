@@ -79,6 +79,71 @@ static bool is_buffer_descriptor(VkDescriptorType type)
     }
 }
 
+static bool slang_source_to_spv_path(const char* source_path, char* out_path, size_t out_cap)
+{
+    if(!source_path || !out_path || out_cap == 0)
+        return false;
+
+    if(ends_with(source_path, ".spv"))
+    {
+        snprintf(out_path, out_cap, "%s", source_path);
+        return true;
+    }
+
+    const char* base = strrchr(source_path, '/');
+    base = base ? base + 1 : source_path;
+
+    char name[256];
+    snprintf(name, sizeof(name), "%s", base);
+    char* dot = strrchr(name, '.');
+    if(dot)
+        *dot = '\0';
+
+    int n = snprintf(out_path, out_cap, "compiledshaders/%s.comp.spv", name);
+    return (n > 0 && (size_t)n < out_cap);
+}
+
+static bool compile_slang_to_spv_cli(const char* source_path, const char* spv_path, const char* entry)
+{
+    if(!source_path || !spv_path || !entry)
+        return false;
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "/opt/shader-slang-bin/bin/slangc \"%s\" -o \"%s\" -target spirv -entry \"%s\" 2> compiledshaders/shader_errors.txt",
+             source_path, spv_path, entry);
+
+    int r = system(cmd);
+    if(r != 0)
+    {
+        log_error("slangc failed: %s -> %s (entry=%s)", source_path, spv_path, entry);
+
+        FILE* f = fopen("compiledshaders/shader_errors.txt", "rb");
+        if(f)
+        {
+            fseek(f, 0, SEEK_END);
+            long len = ftell(f);
+            rewind(f);
+
+            if(len > 0)
+            {
+                char* msg = (char*)malloc((size_t)len + 1);
+                if(msg)
+                {
+                    fread(msg, 1, (size_t)len, f);
+                    msg[len] = 0;
+                    log_error("Slang compile log:\n%s", msg);
+                    free(msg);
+                }
+            }
+            fclose(f);
+        }
+
+        return false;
+    }
+
+    return true;
+}
+
 // ------------------------------------------------------------
 // Shader hot reload (RenderPipeline)
 // ------------------------------------------------------------
@@ -267,8 +332,21 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline*         pipe,
     {
         void*  comp_code = NULL;
         size_t comp_size = 0;
-        if(!read_file(spec->comp_spv, &comp_code, &comp_size))
-            return VK_NULL_HANDLE;
+        if(spec->shader == SLANG)
+        {
+            char spv_path[1024];
+            if(!slang_source_to_spv_path(spec->comp_spv, spv_path, sizeof(spv_path)))
+                return VK_NULL_HANDLE;
+            if(!compile_slang_to_spv_cli(spec->comp_spv, spv_path, "computeMain"))
+                return VK_NULL_HANDLE;
+            if(!read_file(spv_path, &comp_code, &comp_size))
+                return VK_NULL_HANDLE;
+        }
+        else
+        {
+            if(!read_file(spec->comp_spv, &comp_code, &comp_size))
+                return VK_NULL_HANDLE;
+        }
 
         VkShaderModule comp_mod = create_shader_module(device, comp_code, comp_size);
 
@@ -539,13 +617,26 @@ static void render_pipeline_hot_reload_register(RenderPipeline* pipe, VkPipeline
     if(spec->frag_spv)
         entry.frag_path = dup_string(spec->frag_spv);
     if(spec->comp_spv)
-        entry.comp_path = dup_string(spec->comp_spv);
+    {
+        if(spec->shader == SLANG && !ends_with(spec->comp_spv, ".spv"))
+        {
+            char spv_path[1024];
+            if(slang_source_to_spv_path(spec->comp_spv, spv_path, sizeof(spv_path)))
+                entry.comp_path = dup_string(spv_path);
+            else
+                entry.comp_path = dup_string(spec->comp_spv);
+        }
+        else
+        {
+            entry.comp_path = dup_string(spec->comp_spv);
+        }
+    }
 
     if(entry.vert_path)
         entry.spec.vert_spv = entry.vert_path;
     if(entry.frag_path)
         entry.spec.frag_spv = entry.frag_path;
-    if(entry.comp_path)
+    if(entry.comp_path && !(spec->shader == SLANG && spec->comp_spv && !ends_with(spec->comp_spv, ".spv")))
         entry.spec.comp_spv = entry.comp_path;
 
     char src_path[1024];
@@ -553,8 +644,17 @@ static void render_pipeline_hot_reload_register(RenderPipeline* pipe, VkPipeline
         entry.vert_mtime = file_mtime_ns(src_path);
     if(entry.frag_path && spv_to_source_path(src_path, sizeof(src_path), entry.frag_path))
         entry.frag_mtime = file_mtime_ns(src_path);
-    if(entry.comp_path && spv_to_source_path(src_path, sizeof(src_path), entry.comp_path))
-        entry.comp_mtime = file_mtime_ns(src_path);
+    if(entry.comp_path)
+    {
+        if(spec->shader == SLANG && spec->comp_spv && !ends_with(spec->comp_spv, ".spv"))
+        {
+            entry.comp_mtime = file_mtime_ns(spec->comp_spv);
+        }
+        else if(spv_to_source_path(src_path, sizeof(src_path), entry.comp_path))
+        {
+            entry.comp_mtime = file_mtime_ns(src_path);
+        }
+    }
 
     render_reload_entries_push(&entry);
 }
@@ -594,16 +694,31 @@ void render_pipeline_hot_reload_update(void)
 
         if(e->is_compute)
         {
-            char comp_src[1024];
-            if(!e->comp_path || !spv_to_source_path(comp_src, sizeof(comp_src), e->comp_path))
+            const char* comp_src = NULL;
+            char        comp_src_buf[1024];
+
+            if(e->spec.shader == SLANG && e->spec.comp_spv && !ends_with(e->spec.comp_spv, ".spv"))
+            {
+                comp_src = e->spec.comp_spv;
+            }
+            else if(e->comp_path && spv_to_source_path(comp_src_buf, sizeof(comp_src_buf), e->comp_path))
+            {
+                comp_src = comp_src_buf;
+            }
+            else
+            {
                 continue;
+            }
 
             uint64_t comp_src_mtime = file_mtime_ns(comp_src);
             if(comp_src_mtime == e->comp_mtime)
                 continue;
 
-            if(!compile_glsl_to_spv(comp_src, e->comp_path))
-                continue;
+            if(e->spec.shader != SLANG)
+            {
+                if(!compile_glsl_to_spv(comp_src, e->comp_path))
+                    continue;
+            }
 
             e->comp_mtime = comp_src_mtime;
 
@@ -1202,8 +1317,21 @@ RenderPipeline render_pipeline_create(VkDevice                device,
 
     if(is_compute)
     {
-        if(!read_file(spec->comp_spv, &comp_code, &comp_size))
-            return out;
+        if(spec->shader == SLANG)
+        {
+            char spv_path[1024];
+            if(!slang_source_to_spv_path(spec->comp_spv, spv_path, sizeof(spv_path)))
+                return out;
+            if(!compile_slang_to_spv_cli(spec->comp_spv, spv_path, "computeMain"))
+                return out;
+            if(!read_file(spv_path, &comp_code, &comp_size))
+                return out;
+        }
+        else
+        {
+            if(!read_file(spec->comp_spv, &comp_code, &comp_size))
+                return out;
+        }
 
         if(shader_reflect_create(&reflections[refl_count], comp_code, comp_size))
             refl_count++;
