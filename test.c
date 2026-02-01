@@ -338,6 +338,19 @@ typedef struct ToonPC
     vec4 params3;              // x=isFace, y=outlineZOffsetRemapStart, z=outlineZOffsetRemapEnd, w=unused
 } ToonPC;
 
+typedef struct SkyParams
+{
+    float sunDirection[3];
+    float sunIntensity;
+
+    float skyZenithColor[3];
+    float skyHorizonColor;
+
+    float sunColor[3];
+    float hazeStrength;
+    float exposure;
+} SkyParams;
+
 typedef struct PostProcessParams
 {
     float resolution[2];
@@ -657,6 +670,7 @@ int main()
     RenderObject cull_obj          = {0};
     RenderObject terrain_paint_obj = {0};
     RenderObject postprocess_obj   = {0};
+    RenderObject sky_obj           = {0};
 
     RenderObjectInstance toon_inst          = {0};
     RenderObjectInstance toon_outline_inst  = {0};
@@ -668,6 +682,7 @@ int main()
     RenderObjectInstance terrain_paint_inst = {0};
     RenderObjectInstance raymarch_inst      = {0};
     RenderObjectInstance postprocess_inst   = {0};
+    RenderObjectInstance sky_inst           = {0};
 
     RenderObjectSpec tri_spec          = render_object_spec_from_config(&cfg);
     tri_spec.vert_spv                  = "compiledshaders/tri.vert.spv";
@@ -774,6 +789,20 @@ int main()
     render_object_create(&postprocess_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &postprocess_spec,
                          MAX_FRAME_IN_FLIGHT);
     render_instance_create(&postprocess_inst, &postprocess_obj.pipeline, &postprocess_obj.resources);
+
+    RenderObjectSpec sky_spec = render_object_spec_from_config(&cfg);
+    sky_spec.vert_spv               = "shaders/sky.slang";
+    sky_spec.frag_spv               = "shaders/sky.slang";
+    sky_spec.shader                 = SLANG;
+    sky_spec.use_vertex_input       = VK_FALSE;
+    sky_spec.depth_test             = VK_FALSE;
+    sky_spec.depth_write            = VK_FALSE;
+    sky_spec.color_attachment_count = 1;
+    sky_spec.color_formats          = &hdr_format;
+    sky_spec.reloadable             = VK_TRUE;
+
+    render_object_create(&sky_obj, VK_NULL_HANDLE, &desc_cache, &pipe_cache, &persistent_desc, &sky_spec, 1);
+    render_instance_create(&sky_inst, &sky_obj.pipeline, &sky_obj.resources);
     BufferArena host_arena         = {0};
     BufferArena device_arena       = {0};
     BufferSlice global_ubo_buf     = {0};
@@ -1909,6 +1938,23 @@ swapchain_needs_recreate |=
         vk_cmd_set_viewport_scissor(cmd, swap.extent);
         vkCmdBeginRendering(cmd, &rendering);
 
+        GPU_SCOPE(cmd, P, "sky", VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT)
+        {
+            SkyParams sky_pc = {
+                .sunDirection   = {0.3f, 1.0f, 0.2f},
+                .sunIntensity   = 2.0f,
+                .skyZenithColor = {0.06f, 0.12f, 0.25f},
+                .skyHorizonColor = 0.65f,
+                .sunColor       = {1.0f, 0.95f, 0.85f},
+                .hazeStrength   = 0.15f,
+                .exposure       = 1.0f,
+            };
+            render_instance_bind(cmd, &sky_inst, VK_PIPELINE_BIND_POINT_GRAPHICS, current_frame);
+            render_instance_set_push_data(&sky_inst, &sky_pc, sizeof(sky_pc));
+            render_instance_push(cmd, &sky_inst);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+        }
+
         GPU_SCOPE(cmd, P, "terrain", VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT)
         {
 
@@ -2397,6 +2443,7 @@ swapchain_needs_recreate |=
     render_object_destroy(device, &cull_obj);
     render_object_destroy(device, &terrain_paint_obj);
     render_object_destroy(device, &postprocess_obj);
+    render_object_destroy(device, &sky_obj);
     vkDestroySurfaceKHR(ctx.instance, surface, NULL);
     vkDestroyDevice(device, NULL);
 

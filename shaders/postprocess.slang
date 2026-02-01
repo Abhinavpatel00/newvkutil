@@ -12,8 +12,8 @@
 #define ENABLE_COLOR_GRADE
 #define ENABLE_VIGNETTE
 #define ENABLE_FILM_GRAIN
-#define ENABLE_SHARPEN
-#define ENABLE_CHROM_AB
+//#define ENABLE_SHARPEN
+//#define ENABLE_CHROM_AB
 #define ENABLE_GAMMA
 
 // ---------------------------------------------------------------------------

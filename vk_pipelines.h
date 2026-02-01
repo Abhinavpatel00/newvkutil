@@ -44,6 +44,21 @@ typedef struct ShaderProgram {
     uint32_t         stage_count;  // Number of stages
 } ShaderProgram;
 
+static inline const char* shader_stage_default_entry(VkShaderStageFlagBits stage)
+{
+    switch(stage)
+    {
+        case VK_SHADER_STAGE_VERTEX_BIT:
+            return "vsMain";
+        case VK_SHADER_STAGE_FRAGMENT_BIT:
+            return "psMain";
+        case VK_SHADER_STAGE_COMPUTE_BIT:
+            return "computeMain";
+        default:
+            return "main";
+    }
+}
+
 typedef struct CompiledShaderStage {
     VkShaderStageFlagBits stage;
     const void*           code;   // SPIR-V bytecode (caller frees)
@@ -64,20 +79,20 @@ static inline ShaderProgram shader_program_from_spec(const Shaderspec* spec)
         
         if (spec->vert) {
             prog.stages[prog.stage_count].file = NULL;
-            prog.stages[prog.stage_count].entry = "vertexMain";
+            prog.stages[prog.stage_count].entry = shader_stage_default_entry(VK_SHADER_STAGE_VERTEX_BIT);
             prog.stages[prog.stage_count].stage = VK_SHADER_STAGE_VERTEX_BIT;
             prog.stage_count++;
         }
         if (spec->frag) {
             prog.stages[prog.stage_count].file = NULL;
-            prog.stages[prog.stage_count].entry = "fragmentMain";
+            prog.stages[prog.stage_count].entry = shader_stage_default_entry(VK_SHADER_STAGE_FRAGMENT_BIT);
             prog.stages[prog.stage_count].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
             prog.stage_count++;
         }
         if (spec->comp) {
             prog.source = spec->comp;
             prog.stages[prog.stage_count].file = NULL;
-            prog.stages[prog.stage_count].entry = "computeMain";
+            prog.stages[prog.stage_count].entry = shader_stage_default_entry(VK_SHADER_STAGE_COMPUTE_BIT);
             prog.stages[prog.stage_count].stage = VK_SHADER_STAGE_COMPUTE_BIT;
             prog.stage_count++;
         }

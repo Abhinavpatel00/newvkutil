@@ -103,6 +103,30 @@ static bool slang_source_to_spv_path(const char* source_path, char* out_path, si
     return (n > 0 && (size_t)n < out_cap);
 }
 
+static bool slang_source_to_stage_spv_path(const char* source_path, const char* stage_ext, char* out_path, size_t out_cap)
+{
+    if(!source_path || !stage_ext || !out_path || out_cap == 0)
+        return false;
+
+    if(ends_with(source_path, ".spv"))
+    {
+        snprintf(out_path, out_cap, "%s", source_path);
+        return true;
+    }
+
+    const char* base = strrchr(source_path, '/');
+    base = base ? base + 1 : source_path;
+
+    char name[256];
+    snprintf(name, sizeof(name), "%s", base);
+    char* dot = strrchr(name, '.');
+    if(dot)
+        *dot = '\0';
+
+    int n = snprintf(out_path, out_cap, "compiledshaders/%s.%s.spv", name, stage_ext);
+    return (n > 0 && (size_t)n < out_cap);
+}
+
 static bool compile_slang_to_spv_cli(const char* source_path, const char* spv_path, const char* entry)
 {
     if(!source_path || !spv_path || !entry)
@@ -381,13 +405,51 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline*         pipe,
     if(!spec->vert_spv || !spec->frag_spv)
         return VK_NULL_HANDLE;
 
-    if(!read_file(spec->vert_spv, &vert_code, &vert_size))
-        return VK_NULL_HANDLE;
-
-    if(!read_file(spec->frag_spv, &frag_code, &frag_size))
+    if(spec->shader == SLANG)
     {
-        free(vert_code);
-        return VK_NULL_HANDLE;
+        char vert_spv[1024];
+        char frag_spv[1024];
+        if(!slang_source_to_stage_spv_path(spec->vert_spv, "vert", vert_spv, sizeof(vert_spv)))
+            return VK_NULL_HANDLE;
+        if(!slang_source_to_stage_spv_path(spec->frag_spv, "frag", frag_spv, sizeof(frag_spv)))
+            return VK_NULL_HANDLE;
+        if(!compile_slang_to_spv_cli(spec->vert_spv, vert_spv, "vsMain"))
+            return VK_NULL_HANDLE;
+        if(!compile_slang_to_spv_cli(spec->frag_spv, frag_spv, "psMain"))
+            return VK_NULL_HANDLE;
+        if(!read_file(vert_spv, &vert_code, &vert_size))
+            return VK_NULL_HANDLE;
+        if(!read_file(frag_spv, &frag_code, &frag_size))
+        {
+            free(vert_code);
+            return VK_NULL_HANDLE;
+        }
+    }
+    else
+    {
+        if(!read_file(spec->vert_spv, &vert_code, &vert_size))
+            return VK_NULL_HANDLE;
+
+        if(!read_file(spec->frag_spv, &frag_code, &frag_size))
+        {
+            free(vert_code);
+            return VK_NULL_HANDLE;
+        }
+    }
+
+    const char* vert_entry_name = "main";
+    const char* frag_entry_name = "main";
+    ShaderReflection vert_reflect = {0};
+    ShaderReflection frag_reflect = {0};
+    if(shader_reflect_create(&vert_reflect, vert_code, vert_size))
+    {
+        if(vert_reflect.entry_point)
+            vert_entry_name = vert_reflect.entry_point;
+    }
+    if(shader_reflect_create(&frag_reflect, frag_code, frag_size))
+    {
+        if(frag_reflect.entry_point)
+            frag_entry_name = frag_reflect.entry_point;
     }
 
     VkShaderModule vert_mod = create_shader_module(device, vert_code, vert_size);
@@ -398,14 +460,14 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline*         pipe,
             .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage               = VK_SHADER_STAGE_VERTEX_BIT,
             .module              = vert_mod,
-            .pName               = "main",
+            .pName               = vert_entry_name,
             .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
         },
         {
             .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage               = VK_SHADER_STAGE_FRAGMENT_BIT,
             .module              = frag_mod,
-            .pName               = "main",
+            .pName               = frag_entry_name,
             .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
         },
     };
@@ -578,6 +640,9 @@ static VkPipeline render_pipeline_rebuild(RenderPipeline*         pipe,
     vkDestroyShaderModule(device, vert_mod, NULL);
     vkDestroyShaderModule(device, frag_mod, NULL);
 
+    shader_reflect_destroy(&vert_reflect);
+    shader_reflect_destroy(&frag_reflect);
+
     free(vert_code);
     free(frag_code);
 
@@ -612,10 +677,36 @@ static void render_pipeline_hot_reload_register(RenderPipeline* pipe, VkPipeline
 
     entry.spec = render_object_spec_clone(spec);
 
-    if(spec->vert_spv)
-        entry.vert_path = dup_string(spec->vert_spv);
-    if(spec->frag_spv)
-        entry.frag_path = dup_string(spec->frag_spv);
+        if(spec->vert_spv)
+        {
+            if(spec->shader == SLANG && !ends_with(spec->vert_spv, ".spv"))
+            {
+                char spv_path[1024];
+                if(slang_source_to_stage_spv_path(spec->vert_spv, "vert", spv_path, sizeof(spv_path)))
+                    entry.vert_path = dup_string(spv_path);
+                else
+                    entry.vert_path = dup_string(spec->vert_spv);
+            }
+            else
+            {
+                entry.vert_path = dup_string(spec->vert_spv);
+            }
+        }
+        if(spec->frag_spv)
+        {
+            if(spec->shader == SLANG && !ends_with(spec->frag_spv, ".spv"))
+            {
+                char spv_path[1024];
+                if(slang_source_to_stage_spv_path(spec->frag_spv, "frag", spv_path, sizeof(spv_path)))
+                    entry.frag_path = dup_string(spv_path);
+                else
+                    entry.frag_path = dup_string(spec->frag_spv);
+            }
+            else
+            {
+                entry.frag_path = dup_string(spec->frag_spv);
+            }
+        }
     if(spec->comp_spv)
     {
         if(spec->shader == SLANG && !ends_with(spec->comp_spv, ".spv"))
@@ -632,18 +723,36 @@ static void render_pipeline_hot_reload_register(RenderPipeline* pipe, VkPipeline
         }
     }
 
-    if(entry.vert_path)
+    if(entry.vert_path && !(spec->shader == SLANG && spec->vert_spv && !ends_with(spec->vert_spv, ".spv")))
         entry.spec.vert_spv = entry.vert_path;
-    if(entry.frag_path)
+    if(entry.frag_path && !(spec->shader == SLANG && spec->frag_spv && !ends_with(spec->frag_spv, ".spv")))
         entry.spec.frag_spv = entry.frag_path;
     if(entry.comp_path && !(spec->shader == SLANG && spec->comp_spv && !ends_with(spec->comp_spv, ".spv")))
         entry.spec.comp_spv = entry.comp_path;
 
     char src_path[1024];
-    if(entry.vert_path && spv_to_source_path(src_path, sizeof(src_path), entry.vert_path))
-        entry.vert_mtime = file_mtime_ns(src_path);
-    if(entry.frag_path && spv_to_source_path(src_path, sizeof(src_path), entry.frag_path))
-        entry.frag_mtime = file_mtime_ns(src_path);
+        if(entry.vert_path)
+        {
+            if(spec->shader == SLANG && spec->vert_spv && !ends_with(spec->vert_spv, ".spv"))
+            {
+                entry.vert_mtime = file_mtime_ns(spec->vert_spv);
+            }
+            else if(spv_to_source_path(src_path, sizeof(src_path), entry.vert_path))
+            {
+                entry.vert_mtime = file_mtime_ns(src_path);
+            }
+        }
+        if(entry.frag_path)
+        {
+            if(spec->shader == SLANG && spec->frag_spv && !ends_with(spec->frag_spv, ".spv"))
+            {
+                entry.frag_mtime = file_mtime_ns(spec->frag_spv);
+            }
+            else if(spv_to_source_path(src_path, sizeof(src_path), entry.frag_path))
+            {
+                entry.frag_mtime = file_mtime_ns(src_path);
+            }
+        }
     if(entry.comp_path)
     {
         if(spec->shader == SLANG && spec->comp_spv && !ends_with(spec->comp_spv, ".spv"))
@@ -744,13 +853,28 @@ void render_pipeline_hot_reload_update(void)
             continue;
         }
 
-        char vert_src[1024], frag_src[1024];
-        if(!e->vert_path || !e->frag_path)
-            continue;
-        if(!spv_to_source_path(vert_src, sizeof(vert_src), e->vert_path)
-           || !spv_to_source_path(frag_src, sizeof(frag_src), e->frag_path))
+        const char* vert_src = NULL;
+        const char* frag_src = NULL;
+        char        vert_src_buf[1024];
+        char        frag_src_buf[1024];
+
+        if(e->spec.shader == SLANG && e->spec.vert_spv && e->spec.frag_spv
+           && !ends_with(e->spec.vert_spv, ".spv") && !ends_with(e->spec.frag_spv, ".spv"))
         {
-            continue;
+            vert_src = e->spec.vert_spv;
+            frag_src = e->spec.frag_spv;
+        }
+        else
+        {
+            if(!e->vert_path || !e->frag_path)
+                continue;
+            if(!spv_to_source_path(vert_src_buf, sizeof(vert_src_buf), e->vert_path)
+               || !spv_to_source_path(frag_src_buf, sizeof(frag_src_buf), e->frag_path))
+            {
+                continue;
+            }
+            vert_src = vert_src_buf;
+            frag_src = frag_src_buf;
         }
 
         uint64_t vert_src_mtime = file_mtime_ns(vert_src);
@@ -759,14 +883,17 @@ void render_pipeline_hot_reload_update(void)
         if(vert_src_mtime == e->vert_mtime && frag_src_mtime == e->frag_mtime)
             continue;
 
-        bool ok = true;
-        if(vert_src_mtime != e->vert_mtime)
-            ok &= compile_glsl_to_spv(vert_src, e->vert_path);
-        if(frag_src_mtime != e->frag_mtime)
-            ok &= compile_glsl_to_spv(frag_src, e->frag_path);
+        if(e->spec.shader != SLANG)
+        {
+            bool ok = true;
+            if(vert_src_mtime != e->vert_mtime)
+                ok &= compile_glsl_to_spv(vert_src, e->vert_path);
+            if(frag_src_mtime != e->frag_mtime)
+                ok &= compile_glsl_to_spv(frag_src, e->frag_path);
 
-        if(!ok)
-            continue;
+            if(!ok)
+                continue;
+        }
 
         e->vert_mtime = vert_src_mtime;
         e->frag_mtime = frag_src_mtime;
@@ -1343,12 +1470,22 @@ RenderPipeline render_pipeline_create(VkDevice                device,
             log_error("Render pipeline requires vert_spv for graphics");
             return out;
         }
-        if(!read_file(spec->vert_spv, &vert_code, &vert_size))
-            return out;
 
-        if(spec->frag_spv)
+        if(spec->shader == SLANG)
         {
-            if(!read_file(spec->frag_spv, &frag_code, &frag_size))
+            char vert_spv[1024];
+            char frag_spv[1024];
+            if(!slang_source_to_stage_spv_path(spec->vert_spv, "vert", vert_spv, sizeof(vert_spv)))
+                return out;
+            if(!slang_source_to_stage_spv_path(spec->frag_spv, "frag", frag_spv, sizeof(frag_spv)))
+                return out;
+            if(!compile_slang_to_spv_cli(spec->vert_spv, vert_spv, "vsMain"))
+                return out;
+            if(!compile_slang_to_spv_cli(spec->frag_spv, frag_spv, "psMain"))
+                return out;
+            if(!read_file(vert_spv, &vert_code, &vert_size))
+                return out;
+            if(!read_file(frag_spv, &frag_code, &frag_size))
             {
                 free(vert_code);
                 return out;
@@ -1356,9 +1493,23 @@ RenderPipeline render_pipeline_create(VkDevice                device,
         }
         else
         {
-            log_error("Render pipeline requires frag_spv for graphics");
-            free(vert_code);
-            return out;
+            if(!read_file(spec->vert_spv, &vert_code, &vert_size))
+                return out;
+
+            if(spec->frag_spv)
+            {
+                if(!read_file(spec->frag_spv, &frag_code, &frag_size))
+                {
+                    free(vert_code);
+                    return out;
+                }
+            }
+            else
+            {
+                log_error("Render pipeline requires frag_spv for graphics");
+                free(vert_code);
+                return out;
+            }
         }
 
         if(shader_reflect_create(&reflections[refl_count], vert_code, vert_size))
@@ -1373,6 +1524,19 @@ RenderPipeline render_pipeline_create(VkDevice                device,
         free(frag_code);
         free(comp_code);
         return out;
+    }
+
+    const char* vert_entry_name = "main";
+    const char* frag_entry_name = "main";
+    if(!is_compute)
+    {
+        for(uint32_t i = 0; i < refl_count; i++)
+        {
+            if(reflections[i].stage == VK_SHADER_STAGE_VERTEX_BIT && reflections[i].entry_point)
+                vert_entry_name = reflections[i].entry_point;
+            if(reflections[i].stage == VK_SHADER_STAGE_FRAGMENT_BIT && reflections[i].entry_point)
+                frag_entry_name = reflections[i].entry_point;
+        }
     }
 
     MergedReflection merged = {0};
@@ -1439,14 +1603,14 @@ RenderPipeline render_pipeline_create(VkDevice                device,
                 .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .stage               = VK_SHADER_STAGE_VERTEX_BIT,
                 .module              = vert_mod,
-                .pName               = "main",
+                .pName               = vert_entry_name,
                 .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
             },
             {
                 .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .stage               = VK_SHADER_STAGE_FRAGMENT_BIT,
                 .module              = frag_mod,
-                .pName               = "main",
+                .pName               = frag_entry_name,
                 .pSpecializationInfo = (spec_info.mapEntryCount > 0) ? &spec_info : NULL,
             },
         };
