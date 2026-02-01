@@ -379,6 +379,45 @@ typedef struct PostProcessParams
     float chromaticAberrationStrength;
     float gamma;
 } PostProcessParams;
+VkSampler create_linear_sampler(VkDevice device)
+{
+    VkSamplerCreateInfo info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+
+        // Filtering
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+
+        // Addressing
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+
+        // LOD
+        .mipLodBias = 0.0f,
+        .minLod = 0.0f,
+        .maxLod = VK_LOD_CLAMP_NONE,
+
+        // Anisotropy (OFF by default)
+        .anisotropyEnable = VK_FALSE,
+        .maxAnisotropy = 1.0f,
+
+        // Comparison (not for shadow maps)
+        .compareEnable = VK_FALSE,
+        .compareOp = VK_COMPARE_OP_ALWAYS,
+
+        // Border (ignored for REPEAT)
+        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+
+        // Normalized UVs (ALWAYS true unless you know what you're doing)
+        .unnormalizedCoordinates = VK_FALSE,
+    };
+
+    VkSampler sampler = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateSampler(device, &info, NULL, &sampler));
+    return sampler;
+}
 
 
 static const Vertex TRIANGLE_VERTS[] = {
@@ -765,8 +804,9 @@ int main()
 
 
     RenderObjectSpec water_spec          = render_object_spec_from_config(&cfg);
-    water_spec.vert_spv                  = "compiledshaders/water.vert.spv";
-    water_spec.frag_spv                  = "compiledshaders/water.frag.spv";
+    water_spec.vert_spv                  = "shaders/water.slang";
+    water_spec.frag_spv                  = "shaders/water.slang";
+    water_spec.shader  = SLANG;
     water_spec.depth_write               = VK_FALSE;
     water_spec.depth_test                = VK_TRUE;
     water_spec.blend_enable              = VK_TRUE;
@@ -1365,6 +1405,12 @@ int main()
         RW_BUF_O("inst_buf", water_instance_buf.buffer, water_instance_buf.offset, sizeof(WaterInstanceGpu)),
     };
     render_object_write_static(&water_obj, water_writes);
+    VkSampler linear_sampler = create_linear_sampler(device);
+
+RenderWrite water_sampler_write =
+    RW_IMG("linearSampler", VK_NULL_HANDLE, linear_sampler, VK_IMAGE_LAYOUT_UNDEFINED);
+
+render_object_write_static(&water_obj, &water_sampler_write);
 
     RenderWrite cull_writes[] = {
         RW_BUF_O("cullData", cull_data_buffer.buffer, cull_data_buffer.offset, sizeof(CullDataGpu)),
@@ -1488,6 +1534,11 @@ int main()
     bool last_load_key  = false;
     bool last_regen_key = false;
 
+    VkImageView postprocess_output_view[MAX_FRAME_IN_FLIGHT] = {VK_NULL_HANDLE};
+    VkImageView postprocess_input_view[MAX_FRAME_IN_FLIGHT]  = {VK_NULL_HANDLE};
+    VkSampler   postprocess_input_sampler[MAX_FRAME_IN_FLIGHT]  = {VK_NULL_HANDLE};
+    VkSampler   postprocess_linear_sampler[MAX_FRAME_IN_FLIGHT] = {VK_NULL_HANDLE};
+
     bool swapchain_needs_recreate = false;
 
     const float    lod_target  = 1.0f;  // max screen-space error in pixels
@@ -1534,6 +1585,10 @@ swapchain_needs_recreate |=
             recreate_hdr_target(&allocator, device, qf.graphics_queue, upload_pool, swap.extent.width, swap.extent.height, &hdr);
             hdr.sampler = tonemap_sampler;
             // Postprocess writes are updated per-frame with the swapchain image.
+            memset(postprocess_output_view, 0, sizeof(postprocess_output_view));
+            memset(postprocess_input_view, 0, sizeof(postprocess_input_view));
+            memset(postprocess_input_sampler, 0, sizeof(postprocess_input_sampler));
+            memset(postprocess_linear_sampler, 0, sizeof(postprocess_linear_sampler));
             vk_debug_text_on_swapchain_recreated(&dbg, &persistent_desc, &desc_cache, &swap);
             g_framebuffer_resized = false;
             igRender();
@@ -2209,7 +2264,10 @@ swapchain_needs_recreate |=
                                 .src_access = 0,
                                 .dst_access = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-        GPU_SCOPE(cmd, P, "postprocess", VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
+        if(postprocess_output_view[current_frame] != swap.image_views[image_index]
+           || postprocess_input_view[current_frame] != hdr.view
+           || postprocess_input_sampler[current_frame] != hdr.sampler
+           || postprocess_linear_sampler[current_frame] != tonemap_sampler)
         {
             RenderWrite pp_writes[] = {
                 RW_IMG("inputImage", hdr.view, hdr.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
@@ -2217,7 +2275,14 @@ swapchain_needs_recreate |=
                 RW_IMG("linearSampler", VK_NULL_HANDLE, tonemap_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
             };
             render_object_write_frame(&postprocess_obj, current_frame, pp_writes, ARRAY_COUNT(pp_writes));
+            postprocess_output_view[current_frame] = swap.image_views[image_index];
+            postprocess_input_view[current_frame]  = hdr.view;
+            postprocess_input_sampler[current_frame]  = hdr.sampler;
+            postprocess_linear_sampler[current_frame] = tonemap_sampler;
+        }
 
+        GPU_SCOPE(cmd, P, "postprocess", VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
+        {
             PostProcessParams pp_params = {
                 .resolution = {(float)swap.extent.width, (float)swap.extent.height},
                 .time       = (float)glfwGetTime(),

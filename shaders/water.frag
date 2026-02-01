@@ -109,7 +109,7 @@ void main()
     ).r;
 
     foam = smoothstep(0.6, 0.9, foam) * pc.foamStrength;
-    color = mix(color, mat.foamColor.rgb, foam);
+    color = mix(color, mat.foamColor.rgb, foam); 
 
     // ------------------------------------------------------------
     // Alpha
@@ -121,4 +121,4 @@ void main()
 
 
 
-
+ 
