@@ -1,3 +1,4 @@
+
 #version 450
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_GOOGLE_include_directive: require
@@ -18,8 +19,6 @@ layout(set = 0, binding = 0) uniform GlobalUBO
     vec4 cameraPos;
 } ubo;
 
-// Two heightmaps for hybrid terrain
-
 layout(set = 1, binding = 0) uniform sampler2D u_textures[];
 
 struct WaterMaterialGpu
@@ -39,25 +38,17 @@ layout(set = 0, binding = 1, std430) readonly buffer WaterMaterials
 
 layout(push_constant) uniform WaterPC
 {
-  float time;
+    float time;
     float opacity;
 
     float normalScale;
     float foamStrength;
 
     float specular;
-    float fresnelPower;
-    float fresnelStrength;
-
     float specPower;
+
     vec4  sunDirIntensity;
 } pc;
-
-// ------------------------------------------------------------
-// Sample final height = baseHeight + sculptDelta
-// No procedural noise at runtime! Fast water depth calculation.
-// ------------------------------------------------------------
-
 
 void main()
 {
@@ -69,7 +60,7 @@ void main()
     vec2 baseUV = vUV * mat.params0.x;
 
     // ------------------------------------------------------------
-    // Normals FIRST (always)
+    // Normal animation (dominant cost, keep tight)
     // ------------------------------------------------------------
     vec2 nUV1 = baseUV + vec2(pc.time * mat.params0.z,
                               pc.time * mat.params0.z * 0.7);
@@ -83,47 +74,51 @@ void main()
     vec3 N = normalize(vec3(nxy, 1.0));
 
     // ------------------------------------------------------------
-    // View & Fresnel (visual depth illusion)
+    // Activity-based color (REPLACES Fresnel)
     // ------------------------------------------------------------
-    vec3 V = normalize(ubo.cameraPos.xyz - vWorldPos);
-    float facing = clamp(dot(N, V), 0.0, 1.0);
-    float fres = pow(1.0 - facing, pc.fresnelPower) * pc.fresnelStrength;
+    float activity = clamp(length(nxy), 0.0, 1.0);
+    float shallowMix = smoothstep(0.2, 0.6, activity);
 
-    vec3 baseColor = mix(mat.deepColor.rgb, mat.shallowColor.rgb, fres);
+    vec3 baseColor = mix(
+        mat.deepColor.rgb,
+        mat.shallowColor.rgb,
+        shallowMix
+    );
 
     // ------------------------------------------------------------
-    // Lighting
+    // Lighting (sun only, stable)
     // ------------------------------------------------------------
     vec3 L = normalize(pc.sunDirIntensity.xyz);
     float ndl = max(dot(N, L), 0.0);
 
-    vec3 diffuse = baseColor * (0.4 + 0.6 * ndl);
+    vec3 diffuse = baseColor * (0.35 + 0.65 * ndl);
 
-    vec3 H = normalize(L + V);
-    float spec = pow(max(dot(N, H), 0.0), pc.specPower);
+    // Cheap specular (no half vector)
+    vec3 R = reflect(-L, N);
+    float spec = pow(max(R.y, 0.0), pc.specPower);
     spec *= pc.specular * pc.sunDirIntensity.w;
 
-    vec3 color = diffuse + spec + fres * vec3(0.6, 0.8, 1.0);
+    vec3 color = diffuse + spec;
 
     // ------------------------------------------------------------
-    // Foam (decorative, cheap)
+    // Foam (visual anchor, overrides everything)
     // ------------------------------------------------------------
-    float foam = 0.0;
-    if(pc.foamStrength > 0.001)
-    {
-        foam = texture(
-            u_textures[nonuniformEXT(mat.textures.y)],
-            vUV * mat.params0.y + N.xy * 0.1 + pc.time * 0.05
-        ).r;
+    float foam = texture(
+        u_textures[nonuniformEXT(mat.textures.y)],
+        vUV * mat.params0.y + N.xy * 0.1 + pc.time * 0.05
+    ).r;
 
-        foam = smoothstep(0.6, 0.9, foam) * pc.foamStrength;
-        color = mix(color, mat.foamColor.rgb, foam);
-    }
+    foam = smoothstep(0.6, 0.9, foam) * pc.foamStrength;
+    color = mix(color, mat.foamColor.rgb, foam);
 
     // ------------------------------------------------------------
-    // Alpha (simple & stable)
+    // Alpha
     // ------------------------------------------------------------
     float alpha = clamp(pc.opacity + foam * 0.35, 0.0, 1.0);
-
     outColor = vec4(color, alpha);
 }
+
+
+
+
+
